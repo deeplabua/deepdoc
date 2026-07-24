@@ -74,10 +74,29 @@ Batch a whole folder (mirrors the tree into an output dir):
 deepdoc ./docs --recursive -o out/
 ```
 
-Chunk for a RAG pipeline (each chunk keeps its heading context):
+Chunk for a RAG pipeline. Chunks are cut on block boundaries — never through a paragraph or
+a table — and each one carries the chain of headings it sits under, plus a byte range into
+the Markdown it came from:
 
 ```sh
 deepdoc handbook.pdf --chunk 800 --format json
+deepdoc handbook.pdf --chunk 800 --chunk-overlap 100 --format json
+deepdoc handbook.pdf --chunk 800          # same chunks as Markdown, with the cuts marked
+```
+
+```json
+{
+  "source": "handbook.pdf",
+  "meta": { "title": "Handbook", "pages": 24 },
+  "chunks": [
+    {
+      "text": "## Onboarding\n\nYour first day is mostly paperwork…",
+      "heading_path": ["Handbook", "Onboarding"],
+      "source": "handbook.pdf",
+      "byte_range": [1043, 1802]
+    }
+  ]
+}
 ```
 
 Include document metadata as YAML front-matter, or extract a PDF page range:
@@ -132,8 +151,9 @@ DeepDoc is free and open-source, built and maintained by one developer.
 
 - **[⭐ Star the repo](https://github.com/deeplabua/deepdoc)** — the cheapest way to help;
   it boosts visibility so more people find the tool.
-- **Chip in a tip** via the **Sponsor** button at the top of the repo. It supports a
-  Ukrainian developer and keeps the project moving. Thank you 💙💛
+- **Chip in a tip** via the **Sponsor** button at the top of the repo, or directly through the
+  [monobank jar](https://send.monobank.ua/jar/9NjMEHrvCW). It supports a Ukrainian developer
+  and keeps the project moving. Thank you 💙💛
 
 ## Part of DeepLab
 

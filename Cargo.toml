@@ -44,3 +44,31 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "homebrew"]
+# A GitHub repo to push Homebrew formulas to
+tap = "deeplabua/homebrew-tap"
+# Publish jobs to run in CI. `./publish-crates` is the local reusable workflow
+# `.github/workflows/publish-crates.yml` (crates.io publish; needs the
+# CARGO_REGISTRY_TOKEN repo secret).
+publish-jobs = ["homebrew", "./publish-crates"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Whether to install an updater program
+install-updater = false
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# No `[workspace.metadata.dist.dependencies]`: DeepDoc has no runtime dependency
+# at all — that is the whole promise, and the formula must not add one.
