@@ -3,11 +3,16 @@
 //! Extraction is the single impure edge of the core: it reads files and parses
 //! them into a [`Document`]. Everything downstream (`render`, `chunk`) is pure.
 
+pub mod container;
 pub mod csv;
 pub mod html;
 pub mod markdown;
+pub mod odf;
+pub mod ooxml;
 pub mod rtf;
+pub mod spreadsheet;
 pub mod text;
+pub mod xml;
 
 use std::path::Path;
 
@@ -45,14 +50,11 @@ pub fn for_format(format: Format) -> Option<Box<dyn Extractor>> {
         Format::Csv => Some(Box::new(csv::CsvExtractor)),
         Format::Html => Some(Box::new(html::HtmlExtractor)),
         Format::Rtf => Some(Box::new(rtf::RtfExtractor)),
-        Format::Docx
-        | Format::Pptx
-        | Format::Xlsx
-        | Format::Odt
-        | Format::Odp
-        | Format::Ods
-        | Format::Epub
-        | Format::Pdf => None,
+        Format::Docx => Some(Box::new(ooxml::docx::DocxExtractor)),
+        Format::Pptx => Some(Box::new(ooxml::pptx::PptxExtractor)),
+        Format::Odt | Format::Odp => Some(Box::new(odf::OdfExtractor)),
+        Format::Xlsx | Format::Ods => Some(Box::new(spreadsheet::SpreadsheetExtractor)),
+        Format::Epub | Format::Pdf => None,
     }
 }
 

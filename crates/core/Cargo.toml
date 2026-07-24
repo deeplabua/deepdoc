@@ -12,10 +12,18 @@ keywords = ["markdown", "extract", "document", "pdf", "docx"]
 categories = ["text-processing"]
 
 [dependencies]
+calamine = { workspace = true }
 csv = { workspace = true }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 pulldown-cmark = { workspace = true }
+quick-xml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+# The office fixtures are built as real archives inside the tests, so no binary
+# blobs live in the repository.
+zip = { workspace = true }

@@ -180,6 +180,86 @@ fn rtf_file_renders_paragraphs() {
 }
 
 #[test]
+fn office_archives_route_through_the_cli() {
+    let dir = TempDir::new("office");
+
+    // A docx is a ZIP; build the smallest one the extractor will accept.
+    let document = r#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Report</w:t></w:r></w:p>
+          <w:p><w:r><w:t>Body text.</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+    let path = dir.path().join("report.docx");
+    std::fs::write(&path, minimal_zip(&[("word/document.xml", document)])).unwrap();
+
+    let output = deepdoc([path.as_os_str()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "# Report\n\nBody text.\n"
+    );
+}
+
+/// A stored (uncompressed) ZIP, written by hand so the test needs no ZIP crate.
+fn minimal_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut directory = Vec::new();
+
+    for (name, content) in entries {
+        let offset = out.len() as u32;
+        let crc = crc32(content.as_bytes());
+        let size = content.len() as u32;
+
+        // Local file header, stored (method 0).
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(content.as_bytes());
+
+        directory.extend_from_slice(b"PK\x01\x02");
+        directory.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        directory.extend_from_slice(&crc.to_le_bytes());
+        directory.extend_from_slice(&size.to_le_bytes());
+        directory.extend_from_slice(&size.to_le_bytes());
+        directory.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        directory.extend_from_slice(&[0; 8]);
+        directory.extend_from_slice(&0u32.to_le_bytes());
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(name.as_bytes());
+    }
+
+    let directory_offset = out.len() as u32;
+    let directory_size = directory.len() as u32;
+    out.extend_from_slice(&directory);
+
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&directory_size.to_le_bytes());
+    out.extend_from_slice(&directory_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+
+    out
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+#[test]
 fn text_format_strips_markup() {
     let dir = TempDir::new("plain");
     let file = dir.write("page.html", "<h1>Title</h1><p>a <em>word</em></p>");
