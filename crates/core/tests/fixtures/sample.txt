@@ -1,0 +1,4 @@
+DeepDoc plain text fixture.
+
+A second paragraph, wrapped
+across two source lines.

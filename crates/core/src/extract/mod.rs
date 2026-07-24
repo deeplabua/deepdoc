@@ -3,6 +3,10 @@
 //! Extraction is the single impure edge of the core: it reads files and parses
 //! them into a [`Document`]. Everything downstream (`render`, `chunk`) is pure.
 
+pub mod csv;
+pub mod html;
+pub mod markdown;
+pub mod rtf;
 pub mod text;
 
 use std::path::Path;
@@ -36,13 +40,12 @@ pub trait Extractor {
 /// [`Error::NotImplemented`]. Phases 2–5 fill this table in.
 pub fn for_format(format: Format) -> Option<Box<dyn Extractor>> {
     match format {
-        // TODO(Phase 2): parse Markdown properly (pulldown-cmark) instead of
-        // treating it as plain paragraphs.
-        Format::Txt | Format::Markdown => Some(Box::new(text::TextExtractor)),
-        Format::Csv
-        | Format::Html
-        | Format::Rtf
-        | Format::Docx
+        Format::Txt => Some(Box::new(text::TextExtractor)),
+        Format::Markdown => Some(Box::new(markdown::MarkdownExtractor)),
+        Format::Csv => Some(Box::new(csv::CsvExtractor)),
+        Format::Html => Some(Box::new(html::HtmlExtractor)),
+        Format::Rtf => Some(Box::new(rtf::RtfExtractor)),
+        Format::Docx
         | Format::Pptx
         | Format::Xlsx
         | Format::Odt

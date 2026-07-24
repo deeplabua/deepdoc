@@ -12,6 +12,10 @@ keywords = ["markdown", "extract", "document", "pdf", "docx"]
 categories = ["text-processing"]
 
 [dependencies]
+csv = { workspace = true }
+html5ever = { workspace = true }
+markup5ever_rcdom = { workspace = true }
+pulldown-cmark = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

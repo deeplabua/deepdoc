@@ -1,5 +1,6 @@
 //! Routing: inputs → `detect` → `extract` → `render` → stdout or files.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -12,10 +13,12 @@ use deepdoc_core::{Document, exit_code};
 use crate::args::Args;
 use crate::log::{Level, Logger};
 
-/// One input file and the path it keeps relative to its input root (batch mode).
+/// One input file and where its output goes, relative to `-o` (batch mode).
 struct Job {
     path: PathBuf,
     relative: PathBuf,
+    /// Output path under `-o`, with the extension of the chosen format.
+    target: PathBuf,
 }
 
 /// Run the whole invocation and return the process exit code.
@@ -30,7 +33,8 @@ pub fn run(args: &Args) -> Result<i32> {
     };
     let format: OutputFormat = args.format.into();
 
-    let jobs = collect_jobs(args)?;
+    let mut jobs = collect_jobs(args)?;
+    assign_targets(&mut jobs, output_extension(args));
     if jobs.is_empty() {
         logger.warn("nothing to extract");
         return Ok(exit_code::OK);
@@ -123,6 +127,7 @@ fn collect_jobs(args: &Args) -> Result<Vec<Job>> {
             jobs.push(Job {
                 path: input.clone(),
                 relative,
+                target: PathBuf::new(),
             });
         }
     }
@@ -146,10 +151,42 @@ fn collect_dir(root: &Path, dir: &Path, jobs: &mut Vec<Job>) -> Result<()> {
             collect_dir(root, &path, jobs)?;
         } else if file_type.is_file() {
             let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-            jobs.push(Job { path, relative });
+            jobs.push(Job {
+                path,
+                relative,
+                target: PathBuf::new(),
+            });
         }
     }
     Ok(())
+}
+
+/// Decide where each job's output goes.
+///
+/// `report.pdf` becomes `report.md`, but a folder holding `report.pdf` and
+/// `report.docx` would then write both to the same file. Colliding names keep
+/// their original extension (`report.pdf.md`) so a batch never silently drops a
+/// document. The decision looks at the whole job list, so it does not depend on
+/// the order files were walked in.
+fn assign_targets(jobs: &mut [Job], extension: &str) {
+    let mut counts: HashMap<PathBuf, usize> = HashMap::new();
+    for job in jobs.iter() {
+        *counts
+            .entry(job.relative.with_extension(extension))
+            .or_default() += 1;
+    }
+
+    for job in jobs.iter_mut() {
+        let short = job.relative.with_extension(extension);
+        job.target = if counts.get(&short).copied().unwrap_or(0) > 1 {
+            let mut name = job.relative.file_name().unwrap_or_default().to_os_string();
+            name.push(".");
+            name.push(extension);
+            job.relative.with_file_name(name)
+        } else {
+            short
+        };
+    }
 }
 
 /// Write a rendered document to stdout or to the output path.
@@ -169,7 +206,7 @@ fn write_output(
     };
 
     let target = if output_is_dir {
-        output.join(job.relative.with_extension(output_extension(args)))
+        output.join(&job.target)
     } else {
         output.clone()
     };
