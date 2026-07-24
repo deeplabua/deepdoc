@@ -34,15 +34,15 @@ impl Extractor for RtfExtractor {
         // RTF is 7-bit ASCII with escapes, but files in the wild carry raw high
         // bytes; lossy decoding keeps those documents usable.
         let text = String::from_utf8_lossy(&raw);
-        let blocks = parse(&text).map_err(|message| Error::parse(path, message))?;
+        let parsed = parse(&text).map_err(|message| Error::parse(path, message))?;
+
+        let mut meta = parsed.meta;
+        meta.source_format = Some(Format::Rtf);
+        meta.source_path = Some(path.display().to_string());
 
         Ok(Document {
-            meta: Metadata {
-                source_format: Some(Format::Rtf),
-                source_path: Some(path.display().to_string()),
-                ..Metadata::default()
-            },
-            blocks,
+            meta,
+            blocks: parsed.blocks,
         })
     }
 }
@@ -54,8 +54,17 @@ struct State {
     italic: bool,
     /// Inside a destination whose content is not document text.
     skip: bool,
+    /// Inside an `\info` field whose text is metadata.
+    capture: Option<Field>,
     /// How many characters follow a `\uN` as its non-unicode fallback.
     unicode_fallback: usize,
+}
+
+/// A metadata field of the `\info` group.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Field {
+    Title,
+    Author,
 }
 
 impl Default for State {
@@ -64,6 +73,7 @@ impl Default for State {
             bold: false,
             italic: false,
             skip: false,
+            capture: None,
             unicode_fallback: 1,
         }
     }
@@ -81,7 +91,6 @@ fn is_skipped_destination(word: &str) -> bool {
             | "filetbl"
             | "rsidtbl"
             | "generator"
-            | "info"
             | "pict"
             | "object"
             | "themedata"
@@ -94,8 +103,15 @@ fn is_skipped_destination(word: &str) -> bool {
     )
 }
 
-/// Parse RTF source into blocks. Pure.
-pub fn parse(source: &str) -> std::result::Result<Vec<Block>, String> {
+/// What a parsed RTF document yields.
+#[derive(Debug, Default, PartialEq)]
+pub struct Parsed {
+    pub meta: Metadata,
+    pub blocks: Vec<Block>,
+}
+
+/// Parse RTF source. Pure.
+pub fn parse(source: &str) -> std::result::Result<Parsed, String> {
     if !source.trim_start().starts_with("{\\rtf") {
         return Err("not an RTF document (no {\\rtf header)".to_string());
     }
@@ -114,6 +130,9 @@ struct Reader<'a> {
     /// Spans of the paragraph being accumulated.
     spans: Vec<Span>,
     blocks: Vec<Block>,
+    meta: Metadata,
+    /// Creation date parts collected from `\creatim`.
+    created: [Option<i32>; 3],
     /// Characters still to swallow as a `\uN` fallback.
     pending_fallback: usize,
     source: std::marker::PhantomData<&'a str>,
@@ -128,6 +147,8 @@ impl Reader<'_> {
             run: String::new(),
             spans: Vec::new(),
             blocks: Vec::new(),
+            meta: Metadata::default(),
+            created: [None; 3],
             pending_fallback: 0,
             source: std::marker::PhantomData,
         }
@@ -267,6 +288,21 @@ impl Reader<'_> {
             "rquote" => self.push_char('’'),
             "ldblquote" => self.push_char('“'),
             "rdblquote" => self.push_char('”'),
+            // `{\info{\title …}{\author …}{\creatim\yr…\mo…\dy…}}`
+            "info" => self.state_mut().skip = true,
+            "title" => self.start_field(Field::Title),
+            "author" => self.start_field(Field::Author),
+            "creatim" => self.state_mut().skip = true,
+            "yr" | "mo" | "dy" => {
+                let index = match word {
+                    "yr" => 0,
+                    "mo" => 1,
+                    _ => 2,
+                };
+                if let Some(value) = parameter {
+                    self.created[index] = Some(value);
+                }
+            }
             word if is_skipped_destination(word) => self.state_mut().skip = true,
             // Everything else is formatting we do not model.
             _ => {}
@@ -297,9 +333,25 @@ impl Reader<'_> {
         }
     }
 
+    /// Open an `\info` field: its text is metadata, not document text.
+    fn start_field(&mut self, field: Field) {
+        self.flush_run();
+        let state = self.state_mut();
+        state.capture = Some(field);
+        state.skip = false;
+    }
+
     fn push_char(&mut self, ch: char) {
         if self.pending_fallback > 0 {
             self.pending_fallback -= 1;
+            return;
+        }
+        if let Some(field) = self.state().capture {
+            let target = match field {
+                Field::Title => &mut self.meta.title,
+                Field::Author => &mut self.meta.author,
+            };
+            target.get_or_insert_with(String::new).push(ch);
             return;
         }
         if self.state().skip {
@@ -310,7 +362,8 @@ impl Reader<'_> {
 
     /// Close the current styled run.
     fn flush_run(&mut self) {
-        if self.run.is_empty() {
+        if self.run.is_empty() || self.state().capture.is_some() {
+            self.run.clear();
             return;
         }
         let text = std::mem::take(&mut self.run);
@@ -326,9 +379,23 @@ impl Reader<'_> {
         }
     }
 
-    fn finish(mut self) -> Vec<Block> {
+    fn finish(mut self) -> Parsed {
         self.end_paragraph();
-        self.blocks
+
+        if let [Some(year), Some(month), Some(day)] = self.created {
+            self.meta.created = Some(format!("{year:04}-{month:02}-{day:02}"));
+        }
+        for field in [&mut self.meta.title, &mut self.meta.author] {
+            if let Some(value) = field {
+                *value = value.trim().to_string();
+            }
+            field.take_if(|value| value.is_empty());
+        }
+
+        Parsed {
+            meta: self.meta,
+            blocks: self.blocks,
+        }
     }
 }
 
@@ -364,7 +431,9 @@ mod tests {
     const HEADER: &str = r"{\rtf1\ansi\deff0{\fonttbl{\f0 Helvetica;}}\pard ";
 
     fn parse_body(body: &str) -> Vec<Block> {
-        parse(&format!("{HEADER}{body}}}")).expect("valid rtf")
+        parse(&format!("{HEADER}{body}}}"))
+            .expect("valid rtf")
+            .blocks
     }
 
     #[test]
@@ -469,6 +538,29 @@ mod tests {
             parse_body(r"text\par \par \par "),
             vec![Block::paragraph("text")]
         );
+    }
+
+    #[test]
+    fn the_info_group_becomes_metadata_not_text() {
+        let parsed = parse(&format!(
+            r"{HEADER}{{\info{{\title Quarterly Report}}{{\author Ada Lovelace}}{{\creatim\yr2026\mo7\dy24\hr10}}}}Body text.\par }}"
+        ))
+        .expect("valid rtf");
+
+        assert_eq!(parsed.meta.title.as_deref(), Some("Quarterly Report"));
+        assert_eq!(parsed.meta.author.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(parsed.meta.created.as_deref(), Some("2026-07-24"));
+        assert_eq!(
+            parsed.blocks,
+            vec![Block::paragraph("Body text.")],
+            "info fields must not leak into the document"
+        );
+    }
+
+    #[test]
+    fn a_document_without_an_info_group_has_no_metadata() {
+        let parsed = parse(&format!(r"{HEADER}just text\par }}")).expect("valid rtf");
+        assert_eq!(parsed.meta, Metadata::default());
     }
 
     #[test]

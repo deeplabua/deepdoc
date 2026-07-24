@@ -1,8 +1,8 @@
 //! OOXML extractors — docx and pptx, plus the parts they share.
 //!
 //! Both are ZIP + XML: the document body lives in one part, its hyperlink
-//! targets in a `_rels` part next to it, and the document properties in
-//! `docProps/core.xml`.
+//! targets in a `_rels` part next to it, and the document properties split
+//! across `docProps/core.xml` (who and when) and `docProps/app.xml` (how big).
 
 pub mod docx;
 pub mod pptx;
@@ -13,13 +13,22 @@ use crate::extract::container::Container;
 use crate::extract::xml;
 use crate::model::Metadata;
 
-/// Read `docProps/core.xml` — the OOXML metadata part shared by every flavour.
+/// Read the OOXML metadata parts shared by every flavour.
+///
+/// The two parts are read independently: a document can ship one without the
+/// other, and losing the page count because `core.xml` is absent would be a
+/// silly way to lose it.
 pub fn core_properties(container: &mut Container) -> Metadata {
+    let mut meta = Metadata {
+        page_count: page_count(container),
+        ..Metadata::default()
+    };
+
     let Some(source) = container.read_optional("docProps/core.xml") else {
-        return Metadata::default();
+        return meta;
     };
     let Ok(root) = xml::parse(&source) else {
-        return Metadata::default();
+        return meta;
     };
 
     let text_of = |name: &str| {
@@ -28,13 +37,27 @@ pub fn core_properties(container: &mut Container) -> Metadata {
             .filter(|text| !text.is_empty())
     };
 
-    Metadata {
-        title: text_of("title"),
-        author: text_of("creator"),
-        created: text_of("created"),
-        language: text_of("language"),
-        ..Metadata::default()
-    }
+    meta.title = text_of("title");
+    meta.author = text_of("creator");
+    meta.created = text_of("created");
+    meta.language = text_of("language");
+    meta
+}
+
+/// Page count from `docProps/app.xml`.
+///
+/// It is the writing application's own count — the only page number an
+/// extractor can honestly report, since laying the document out again is not
+/// something DeepDoc does. `Slides` covers pptx, `Pages` the rest.
+fn page_count(container: &mut Container) -> Option<u32> {
+    let source = container.read_optional("docProps/app.xml")?;
+    let root = xml::parse(&source).ok()?;
+
+    ["Pages", "Slides"]
+        .iter()
+        .find_map(|name| root.find(name))
+        .and_then(|element| element.text().trim().parse().ok())
+        .filter(|count| *count > 0)
 }
 
 /// Relationship id → target, from a `_rels` part.
@@ -84,6 +107,33 @@ mod tests {
         assert_eq!(meta.title.as_deref(), Some("A title"));
         assert_eq!(meta.author.as_deref(), Some("Ada"));
         assert_eq!(meta.created.as_deref(), Some("2026-07-24T10:00:00Z"));
+    }
+
+    #[test]
+    fn page_count_comes_from_the_app_properties() {
+        let word = crate::extract::container::tests::zip_bytes(&[(
+            "docProps/app.xml",
+            r#"<Properties><Pages>12</Pages><Words>3400</Words></Properties>"#,
+        )]);
+        let mut container = Container::from_bytes(&word).unwrap();
+        assert_eq!(core_properties(&mut container).page_count, Some(12));
+
+        let deck = crate::extract::container::tests::zip_bytes(&[(
+            "docProps/app.xml",
+            r#"<Properties><Slides>7</Slides></Properties>"#,
+        )]);
+        let mut container = Container::from_bytes(&deck).unwrap();
+        assert_eq!(core_properties(&mut container).page_count, Some(7));
+    }
+
+    #[test]
+    fn a_zero_page_count_is_no_count_at_all() {
+        let bytes = crate::extract::container::tests::zip_bytes(&[(
+            "docProps/app.xml",
+            r#"<Properties><Pages>0</Pages></Properties>"#,
+        )]);
+        let mut container = Container::from_bytes(&bytes).unwrap();
+        assert_eq!(core_properties(&mut container).page_count, None);
     }
 
     #[test]

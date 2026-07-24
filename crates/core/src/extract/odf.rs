@@ -77,11 +77,20 @@ pub fn metadata(source: Option<&str>) -> Metadata {
             .filter(|text| !text.is_empty())
     };
 
+    // `<meta:document-statistic meta:page-count="12" …/>` — the editor's own
+    // count, which is the only honest one without laying the document out.
+    let page_count = root
+        .find("document-statistic")
+        .and_then(|statistic| statistic.attr_number("page-count"))
+        .and_then(|count| u32::try_from(count).ok())
+        .filter(|count| *count > 0);
+
     Metadata {
         title: text_of("title"),
         author: text_of("creator").or_else(|| text_of("initial-creator")),
         created: text_of("creation-date"),
         language: text_of("language"),
+        page_count,
         ..Metadata::default()
     }
 }
@@ -548,12 +557,14 @@ mod tests {
                    <dc:title>A title</dc:title>
                    <dc:creator>Ada</dc:creator>
                    <meta:creation-date>2026-07-24T10:00:00</meta:creation-date>
+                   <meta:document-statistic meta:page-count="12" meta:word-count="3400"/>
                  </office:meta>
                </office:document-meta>"#,
         ));
         assert_eq!(meta.title.as_deref(), Some("A title"));
         assert_eq!(meta.author.as_deref(), Some("Ada"));
         assert_eq!(meta.created.as_deref(), Some("2026-07-24T10:00:00"));
+        assert_eq!(meta.page_count, Some(12));
         assert_eq!(metadata(None), Metadata::default());
     }
 

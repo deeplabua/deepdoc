@@ -127,6 +127,10 @@ fn docx(dir: &TempDir) -> PathBuf {
                 r#"<Relationships><Relationship Id="rId1" Target="https://example.com"/></Relationships>"#,
             ),
             ("docProps/core.xml", CORE_PROPERTIES),
+            (
+                "docProps/app.xml",
+                r#"<Properties><Pages>3</Pages><Words>120</Words></Properties>"#,
+            ),
         ],
     )
 }
@@ -156,6 +160,7 @@ fn docx_carries_core_properties() {
     let doc = extract(&docx(&dir));
     assert_eq!(doc.meta.title.as_deref(), Some("Quarterly Report"));
     assert_eq!(doc.meta.author.as_deref(), Some("Ada Lovelace"));
+    assert_eq!(doc.meta.page_count, Some(3), "from docProps/app.xml");
 }
 
 // ------------------------------------------------------------------- pptx --
@@ -227,8 +232,9 @@ fn odt(dir: &TempDir) -> PathBuf {
           </table:table>
         </office:text></office:body>
       </office:document-content>"#;
-    let meta = r#"<office:document-meta xmlns:office="o" xmlns:dc="dc"><office:meta>
+    let meta = r#"<office:document-meta xmlns:office="o" xmlns:dc="dc" xmlns:meta="m"><office:meta>
         <dc:title>Quarterly Report</dc:title><dc:creator>Ada Lovelace</dc:creator>
+        <meta:document-statistic meta:page-count="2"/>
       </office:meta></office:document-meta>"#;
 
     let manifest = odf_manifest("application/vnd.oasis.opendocument.text");
@@ -251,6 +257,7 @@ fn odt_becomes_markdown() {
     let doc = extract(&path);
     assert_eq!(doc.meta.source_format, Some(Format::Odt));
     assert_eq!(doc.meta.author.as_deref(), Some("Ada Lovelace"));
+    assert_eq!(doc.meta.page_count, Some(2), "from meta:document-statistic");
 
     assert_eq!(
         markdown(&path),
