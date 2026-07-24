@@ -1,0 +1,17 @@
+[package]
+name = "deepdoc-core"
+description = "Extract clean Markdown, JSON or text from documents — the DeepDoc engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["markdown", "extract", "document", "pdf", "docx"]
+categories = ["text-processing"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

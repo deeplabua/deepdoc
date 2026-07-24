@@ -1,0 +1,7 @@
+/target/
+**/*.rs.bk
+.DS_Store
+
+# Large or private sample documents used while testing — keep tiny fixtures in
+# crates/*/tests/fixtures/ instead.
+/examples/
