@@ -32,6 +32,7 @@ pub fn core_properties(container: &mut Container) -> Metadata {
         title: text_of("title"),
         author: text_of("creator"),
         created: text_of("created"),
+        language: text_of("language"),
         ..Metadata::default()
     }
 }

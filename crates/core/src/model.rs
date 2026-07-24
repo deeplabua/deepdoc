@@ -44,6 +44,11 @@ pub struct Metadata {
     /// Kept as a string on purpose: no date-time dependency in the core.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
+    /// BCP-47 or ISO-639 language tag, as the source spelled it (`en`, `en-GB`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

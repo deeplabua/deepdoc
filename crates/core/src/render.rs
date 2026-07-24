@@ -437,6 +437,12 @@ fn front_matter(meta: &Metadata) -> String {
     if let Some(created) = &meta.created {
         fields.push(("created", yaml_string(created)));
     }
+    if let Some(language) = &meta.language {
+        fields.push(("language", yaml_string(language)));
+    }
+    if let Some(publisher) = &meta.publisher {
+        fields.push(("publisher", yaml_string(publisher)));
+    }
     if let Some(pages) = meta.page_count {
         fields.push(("pages", pages.to_string()));
     }

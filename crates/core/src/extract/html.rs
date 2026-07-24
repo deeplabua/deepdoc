@@ -34,6 +34,7 @@ impl Extractor for HtmlExtractor {
             meta: Metadata {
                 title: parsed.title,
                 author: parsed.author,
+                language: parsed.language,
                 source_format: Some(Format::Html),
                 source_path: Some(path.display().to_string()),
                 ..Metadata::default()
@@ -48,6 +49,8 @@ impl Extractor for HtmlExtractor {
 pub struct Parsed {
     pub title: Option<String>,
     pub author: Option<String>,
+    /// The `lang` attribute of `<html>`, when the page declares one.
+    pub language: Option<String>,
     pub blocks: Vec<Block>,
 }
 
@@ -172,6 +175,14 @@ fn walk(node: &Handle, builder: &mut Builder, parsed: &mut Parsed) {
                         if parsed.title.is_none() && !title.is_empty() {
                             parsed.title = Some(title);
                         }
+                    }
+                    "html" => {
+                        parsed.language = attr(child, "lang")
+                            .map(|lang| lang.trim().to_string())
+                            .filter(|lang| !lang.is_empty());
+                        builder.flush();
+                        walk(child, builder, parsed);
+                        builder.flush();
                     }
                     "meta" => {
                         let attrs = attrs.borrow();
@@ -513,13 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_title_and_author() {
+    fn reads_title_author_and_language() {
         let parsed = parse(
-            "<html><head><title>A page</title><meta name=\"author\" content=\"Ada\"></head>\
+            "<html lang=\"en-GB\"><head><title>A page</title><meta name=\"author\" content=\"Ada\"></head>\
              <body><p>hi</p></body></html>",
         );
         assert_eq!(parsed.title.as_deref(), Some("A page"));
         assert_eq!(parsed.author.as_deref(), Some("Ada"));
+        assert_eq!(parsed.language.as_deref(), Some("en-GB"));
     }
 
     #[test]

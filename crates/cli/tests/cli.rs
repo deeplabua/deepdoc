@@ -199,6 +199,44 @@ fn office_archives_route_through_the_cli() {
     );
 }
 
+#[test]
+fn epub_routes_through_the_cli_with_front_matter() {
+    let dir = TempDir::new("epub");
+
+    let container = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+        </container>"#;
+    let package = r#"<package xmlns="http://www.idpf.org/2007/opf">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>A Short Book</dc:title><dc:creator>Ada</dc:creator>
+          </metadata>
+          <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="c1"/></spine>
+        </package>"#;
+    let chapter = "<html><head><title>Chapter One</title></head><body><p>text</p></body></html>";
+
+    let path = dir.path().join("book.epub");
+    std::fs::write(
+        &path,
+        // `mimetype` must come first for the format to be recognised.
+        minimal_zip(&[
+            ("mimetype", "application/epub+zip"),
+            ("META-INF/container.xml", container),
+            ("content.opf", package),
+            ("ch1.xhtml", chapter),
+        ]),
+    )
+    .unwrap();
+
+    let output = deepdoc([path.as_os_str(), "--metadata".as_ref()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "---\ntitle: \"A Short Book\"\nauthor: \"Ada\"\nformat: \"epub\"\n---\n\n\
+         # Chapter One\n\ntext\n"
+    );
+}
+
 /// A stored (uncompressed) ZIP, written by hand so the test needs no ZIP crate.
 fn minimal_zip(entries: &[(&str, &str)]) -> Vec<u8> {
     let mut out = Vec::new();

@@ -81,6 +81,7 @@ pub fn metadata(source: Option<&str>) -> Metadata {
         title: text_of("title"),
         author: text_of("creator").or_else(|| text_of("initial-creator")),
         created: text_of("creation-date"),
+        language: text_of("language"),
         ..Metadata::default()
     }
 }
@@ -174,10 +175,8 @@ fn list_block(list: &Element, styles: &StyleTable) -> Option<Block> {
     if items.is_empty() {
         return None;
     }
-    // ODF keeps the bullet-vs-number choice in the list style, which lives in
-    // styles.xml; until that is read, a list is a list.
     Some(Block::List {
-        ordered: false,
+        ordered: styles.is_ordered(list.attr("style-name").unwrap_or_default()),
         items,
     })
 }
@@ -278,15 +277,35 @@ fn images(paragraph: &Element) -> Vec<Block> {
         .collect()
 }
 
-/// Style name → bold/italic, from `office:automatic-styles`.
+/// The style names a document refers to, resolved: character styling for spans
+/// and the bullet-versus-number choice for lists.
 #[derive(Default)]
 struct StyleTable {
+    /// Style name → (bold, italic).
     styles: HashMap<String, (bool, bool)>,
+    /// Names of list styles whose first level is numbered.
+    ordered_lists: std::collections::HashSet<String>,
 }
 
 impl StyleTable {
     fn parse(root: &Element) -> StyleTable {
         let mut styles = HashMap::new();
+        let mut ordered_lists = std::collections::HashSet::new();
+
+        // `<text:list-style style:name="L1"><text:list-level-style-number …>`
+        // is a numbered list; `…-style-bullet` and `…-style-image` are not.
+        for list_style in root.find_all("list-style") {
+            let Some(name) = list_style.attr("name") else {
+                continue;
+            };
+            let numbered = list_style
+                .elements()
+                .find(|level| level.name.starts_with("list-level-style-"))
+                .is_some_and(|level| level.name == "list-level-style-number");
+            if numbered {
+                ordered_lists.insert(name.to_string());
+            }
+        }
 
         for style in root.find_all("style") {
             let Some(name) = style.attr("name") else {
@@ -307,7 +326,15 @@ impl StyleTable {
             }
         }
 
-        StyleTable { styles }
+        StyleTable {
+            styles,
+            ordered_lists,
+        }
+    }
+
+    /// Bulleted unless the list's style says it counts.
+    fn is_ordered(&self, style: &str) -> bool {
+        self.ordered_lists.contains(style)
     }
 
     fn wrap(&self, style: &str, inner: Vec<Span>) -> Vec<Span> {
@@ -427,6 +454,31 @@ mod tests {
                     vec![Block::paragraph("two")],
                 ],
             }]
+        );
+    }
+
+    #[test]
+    fn a_numbered_list_style_makes_an_ordered_list() {
+        let source = text_document(
+            r#"<text:list text:style-name="L1"><text:list-item><text:p>one</text:p></text:list-item></text:list>
+               <text:list text:style-name="L2"><text:list-item><text:p>two</text:p></text:list-item></text:list>"#,
+            r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1"/></text:list-style>
+               <text:list-style style:name="L2"><text:list-level-style-bullet text:level="1"/></text:list-style>"#,
+        );
+
+        let parsed = parse(&source).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                Block::List {
+                    ordered: true,
+                    items: vec![vec![Block::paragraph("one")]],
+                },
+                Block::List {
+                    ordered: false,
+                    items: vec![vec![Block::paragraph("two")]],
+                },
+            ]
         );
     }
 

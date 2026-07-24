@@ -5,6 +5,7 @@
 
 pub mod container;
 pub mod csv;
+pub mod epub;
 pub mod html;
 pub mod markdown;
 pub mod odf;
@@ -54,7 +55,8 @@ pub fn for_format(format: Format) -> Option<Box<dyn Extractor>> {
         Format::Pptx => Some(Box::new(ooxml::pptx::PptxExtractor)),
         Format::Odt | Format::Odp => Some(Box::new(odf::OdfExtractor)),
         Format::Xlsx | Format::Ods => Some(Box::new(spreadsheet::SpreadsheetExtractor)),
-        Format::Epub | Format::Pdf => None,
+        Format::Epub => Some(Box::new(epub::EpubExtractor)),
+        Format::Pdf => None,
     }
 }
 
