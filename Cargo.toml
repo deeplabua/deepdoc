@@ -23,6 +23,11 @@ clap = { version = "4.5", features = ["derive"] }       # MIT OR Apache-2.0
 csv = "1.4"                                             # Unlicense OR MIT
 html5ever = "0.39"                                      # MIT OR Apache-2.0
 markup5ever_rcdom = "0.39"                              # MIT OR Apache-2.0
+# PDF. Chosen over raw lopdf because font encodings (CFF, Type1, Identity-H
+# CMaps) are the hard half of PDF text extraction and this crate already solves
+# them, while its OutputDev trait still hands us positions and font sizes — the
+# inputs reading order, columns and heading heuristics need. It re-exports lopdf.
+pdf-extract = "0.12"                                    # MIT
 pulldown-cmark = { version = "0.13", default-features = false }  # MIT
 quick-xml = "0.41"                                      # MIT
 serde = { version = "1.0", features = ["derive"] }      # MIT OR Apache-2.0

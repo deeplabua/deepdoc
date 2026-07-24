@@ -16,6 +16,7 @@ calamine = { workspace = true }
 csv = { workspace = true }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
+pdf-extract = { workspace = true }
 pulldown-cmark = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }

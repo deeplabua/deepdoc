@@ -10,6 +10,7 @@ pub mod html;
 pub mod markdown;
 pub mod odf;
 pub mod ooxml;
+pub mod pdf;
 pub mod rtf;
 pub mod spreadsheet;
 pub mod text;
@@ -56,7 +57,7 @@ pub fn for_format(format: Format) -> Option<Box<dyn Extractor>> {
         Format::Odt | Format::Odp => Some(Box::new(odf::OdfExtractor)),
         Format::Xlsx | Format::Ods => Some(Box::new(spreadsheet::SpreadsheetExtractor)),
         Format::Epub => Some(Box::new(epub::EpubExtractor)),
-        Format::Pdf => None,
+        Format::Pdf => Some(Box::new(pdf::PdfExtractor)),
     }
 }
 
@@ -183,8 +184,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_text_and_leaves_the_rest_open() {
-        assert!(for_format(Format::Txt).is_some());
-        assert!(for_format(Format::Pdf).is_none());
+    fn every_known_format_has_an_extractor() {
+        for format in Format::ALL {
+            assert!(for_format(format).is_some(), "{format} has no extractor");
+        }
     }
 }

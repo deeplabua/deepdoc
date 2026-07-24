@@ -38,6 +38,23 @@ pub enum Format {
 }
 
 impl Format {
+    /// Every format DeepDoc knows about.
+    pub const ALL: [Format; 13] = [
+        Format::Txt,
+        Format::Markdown,
+        Format::Csv,
+        Format::Html,
+        Format::Rtf,
+        Format::Docx,
+        Format::Pptx,
+        Format::Xlsx,
+        Format::Odt,
+        Format::Odp,
+        Format::Ods,
+        Format::Epub,
+        Format::Pdf,
+    ];
+
     /// Canonical lowercase name, as used in metadata and error messages.
     pub fn as_str(self) -> &'static str {
         match self {

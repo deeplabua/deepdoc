@@ -89,12 +89,14 @@ fn unsupported_type_exits_with_five() {
 }
 
 #[test]
-fn known_but_unimplemented_type_exits_with_five() {
-    let dir = TempDir::new("notimpl");
+fn a_recognised_but_broken_document_is_a_read_failure() {
+    let dir = TempDir::new("broken");
     let file = dir.write("book.pdf", "%PDF-1.7\ntrailer");
 
+    // Every format has an extractor now, so a PDF header with nothing behind
+    // it is a damaged file (exit 1), not an unsupported type (exit 5).
     let output = deepdoc([file.as_os_str()]);
-    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(output.status.code(), Some(1));
 }
 
 #[test]
@@ -235,6 +237,86 @@ fn epub_routes_through_the_cli_with_front_matter() {
         "---\ntitle: \"A Short Book\"\nauthor: \"Ada\"\nformat: \"epub\"\n---\n\n\
          # Chapter One\n\ntext\n"
     );
+}
+
+#[test]
+fn pdf_routes_through_the_cli() {
+    let dir = TempDir::new("pdf");
+    let path = dir.path().join("report.pdf");
+    // A title alone is just a line: a heading is only a heading relative to
+    // the body type around it, so the fixture carries both.
+    std::fs::write(
+        &path,
+        minimal_pdf(
+            "BT /F1 24 Tf 72 720 Td (Quarterly Report) Tj ET\n\
+             BT /F1 10 Tf 72 680 Td (Revenue grew twelve per cent.) Tj ET\n",
+        ),
+    )
+    .unwrap();
+
+    let output = deepdoc([path.as_os_str()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "# Quarterly Report\n\nRevenue grew twelve per cent.\n"
+    );
+}
+
+#[test]
+fn a_pdf_without_text_exits_with_four() {
+    let dir = TempDir::new("scan");
+    let path = dir.path().join("scan.pdf");
+    std::fs::write(&path, minimal_pdf("")).unwrap();
+
+    let output = deepdoc([path.as_os_str()]);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--ocr"),
+        "the message should point at OCR"
+    );
+}
+
+/// A one-page PDF drawing the given content stream.
+fn minimal_pdf(content: &str) -> Vec<u8> {
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+           /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        )
+        .into_bytes(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ];
+
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+
+    // The cross-reference table records where every object starts.
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+
+    out
 }
 
 /// A stored (uncompressed) ZIP, written by hand so the test needs no ZIP crate.
