@@ -444,6 +444,220 @@ fn batch_keeps_documents_that_share_a_stem_apart() {
 }
 
 #[test]
+fn batch_mirrors_the_tree_and_reports_a_summary() {
+    let dir = TempDir::new("mirror");
+    std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
+    dir.write("top.txt", "top level");
+    dir.write("sub/middle.txt", "one down");
+    dir.write("sub/deep/leaf.md", "# Leaf\n");
+    // Neither of these is a document; a walked folder holds what it holds.
+    dir.write("mystery.bin", "\u{0}\u{1}\u{2}not a document");
+    dir.write("blank.txt", "   \n");
+    let out = dir.path().join("out");
+
+    let output = deepdoc([
+        dir.path().as_os_str(),
+        "--recursive".as_ref(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ]);
+
+    // Skips do not fail the batch, and they do not stop the files after them.
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(out.join("top.md")).unwrap(),
+        "top level\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("sub/middle.md")).unwrap(),
+        "one down\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("sub/deep/leaf.md")).unwrap(),
+        "# Leaf\n"
+    );
+
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        log.contains("✓ 3 extracted, 2 skipped"),
+        "unexpected log:\n{log}"
+    );
+}
+
+#[test]
+fn a_batch_of_nothing_but_skips_reports_the_reason() {
+    let dir = TempDir::new("allskipped");
+    // Walk order is sorted, so the scan is the first problem the run meets.
+    dir.write("a-scan.txt", "  \n");
+    dir.write("b-mystery.bin", "\u{0}\u{1}\u{2}junk");
+    let out = dir.path().join("out");
+
+    let output = deepdoc([
+        dir.path().as_os_str(),
+        "--recursive".as_ref(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ]);
+
+    // Nothing came out, so the run does not claim success: the first skip
+    // decides the code (no extractable text).
+    assert_eq!(output.status.code(), Some(4));
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        log.contains("0 extracted, 2 skipped"),
+        "unexpected log:\n{log}"
+    );
+    assert!(!log.contains('✓'), "an empty run should not be ticked off");
+}
+
+/// Same input, same bytes — no thread order, no hash order leaking out.
+#[test]
+fn a_batch_is_deterministic() {
+    let dir = TempDir::new("determinism");
+    for index in 0..12 {
+        dir.write(
+            &format!("doc{index}.md"),
+            &format!("# Doc {index}\n\ntext\n"),
+        );
+        dir.write(&format!("data{index}.csv"), "part,qty\nbolt,4\n");
+        dir.write(&format!("page{index}.html"), "<h1>T</h1><p>a <b>b</b></p>");
+        // An office document too: those parse through style and relationship
+        // tables, where an iteration order could escape into the output.
+        let document = r#"<w:document xmlns:w="w"><w:body>
+              <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Report</w:t></w:r></w:p>
+              <w:p><w:r><w:t>Body text.</w:t></w:r></w:p>
+            </w:body></w:document>"#;
+        std::fs::write(
+            dir.path().join(format!("report{index}.docx")),
+            minimal_zip(&[("word/document.xml", document)]),
+        )
+        .unwrap();
+    }
+
+    let first = deepdoc([dir.path().as_os_str(), "--recursive".as_ref()]);
+    let second = deepdoc([dir.path().as_os_str(), "--recursive".as_ref()]);
+    assert_eq!(first.status.code(), Some(0));
+    assert_eq!(first.stdout, second.stdout, "stdout differs between runs");
+    assert_eq!(first.stderr, second.stderr, "the log differs between runs");
+}
+
+#[test]
+fn a_file_the_user_named_is_not_silently_skipped() {
+    let dir = TempDir::new("named");
+    let good = dir.write("notes.txt", "hello");
+    let bad = dir.write("mystery.bin", "\u{0}\u{1}\u{2}junk");
+
+    // Walked folders may hold anything, but a file on the command line was
+    // asked for by name: not being able to read it is a failure.
+    let output = deepdoc([good.as_os_str(), bad.as_os_str()]);
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+}
+
+#[test]
+fn a_missing_input_does_not_cost_the_other_files() {
+    let dir = TempDir::new("missing");
+    let good = dir.write("notes.txt", "hello");
+    let missing = dir.path().join("nope.txt");
+
+    let output = deepdoc([missing.as_os_str(), good.as_os_str()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+}
+
+#[test]
+fn chunk_json_carries_the_documented_schema() {
+    let dir = TempDir::new("chunkjson");
+    let file = dir.write(
+        "handbook.md",
+        "# Handbook\n\n## Onboarding\n\nYour first day is mostly paperwork.\n\n\
+         ## Payroll\n\nSalaries are paid monthly.\n",
+    );
+
+    let output = deepdoc([
+        file.as_os_str(),
+        "--chunk".as_ref(),
+        "40".as_ref(),
+        "--format".as_ref(),
+        "json".as_ref(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("chunk output must be JSON");
+    assert_eq!(json["source"], file.display().to_string());
+    // The document's own metadata keeps the name it has everywhere else.
+    assert_eq!(json["meta"]["title"], "Handbook");
+
+    let chunks = json["chunks"].as_array().expect("chunks must be an array");
+    assert!(
+        chunks.len() > 1,
+        "40 characters should not fit in one chunk"
+    );
+    for chunk in chunks {
+        assert!(chunk["text"].is_string());
+        assert!(chunk["heading_path"].is_array());
+        assert_eq!(chunk["source"], file.display().to_string());
+        assert_eq!(chunk["byte_range"].as_array().unwrap().len(), 2);
+    }
+    assert_eq!(
+        chunks.last().unwrap()["heading_path"],
+        serde_json::json!(["Handbook", "Payroll"])
+    );
+}
+
+#[test]
+fn chunk_byte_ranges_point_into_the_markdown_output() {
+    let dir = TempDir::new("chunkranges");
+    let file = dir.write(
+        "handbook.md",
+        "# Handbook\n\nWelcome aboard, and read this whole page before you start.\n\n\
+         ## Payroll\n\nSalaries are paid monthly, on the last working day.\n",
+    );
+
+    let markdown = deepdoc([file.as_os_str()]);
+    let markdown = String::from_utf8(markdown.stdout).unwrap();
+
+    let output = deepdoc([
+        file.as_os_str(),
+        "--chunk".as_ref(),
+        "60".as_ref(),
+        "--format".as_ref(),
+        "json".as_ref(),
+    ]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    for chunk in json["chunks"].as_array().unwrap() {
+        let start = chunk["byte_range"][0].as_u64().unwrap() as usize;
+        let end = chunk["byte_range"][1].as_u64().unwrap() as usize;
+        assert_eq!(&markdown[start..end], chunk["text"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn chunked_markdown_shows_where_the_cuts_are() {
+    let dir = TempDir::new("chunkmd");
+    let file = dir.write(
+        "handbook.md",
+        "# Handbook\n\nWelcome aboard.\n\n## Payroll\n\nSalaries are paid monthly.\n",
+    );
+
+    let output = deepdoc([file.as_os_str(), "--chunk".as_ref(), "45".as_ref()]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        rendered.contains("<!-- chunk 1/2 | Handbook | bytes"),
+        "unexpected output:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("<!-- chunk 2/2 | Handbook > Payroll | bytes"),
+        "unexpected output:\n{rendered}"
+    );
+    assert!(rendered.contains("Salaries are paid monthly."));
+}
+
+#[test]
 fn directory_without_recursive_is_rejected() {
     let dir = TempDir::new("dir");
     dir.write("notes.txt", "hello");

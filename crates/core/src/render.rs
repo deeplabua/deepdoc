@@ -68,16 +68,35 @@ pub fn to_text(doc: &Document) -> String {
 
 /// Render a run of blocks, each separated by a blank line.
 fn blocks_to_markdown(blocks: &[Block]) -> String {
+    markdown_with_ranges(blocks).0
+}
+
+/// Render blocks and record where each one landed in the output.
+///
+/// [`crate::chunk`] cuts on block boundaries and reports byte ranges into the
+/// Markdown a plain `deepdoc file --format md` run would print, so it needs the
+/// offsets this renderer already knows. One implementation keeps the two from
+/// drifting apart. A block that renders to nothing gets `None`.
+///
+/// The trailing blank line the caller trims away sits past the last range, so
+/// every range stays valid in the trimmed string too.
+pub(crate) fn markdown_with_ranges(blocks: &[Block]) -> (String, Vec<Option<(usize, usize)>>) {
     let mut out = String::new();
+    let mut ranges = Vec::with_capacity(blocks.len());
+
     for block in blocks {
         let rendered = block_to_markdown(block);
         if rendered.trim().is_empty() {
+            ranges.push(None);
             continue;
         }
+        let start = out.len();
         out.push_str(rendered.trim_end());
+        ranges.push(Some((start, out.len())));
         out.push_str("\n\n");
     }
-    out
+
+    (out, ranges)
 }
 
 fn block_to_markdown(block: &Block) -> String {
@@ -357,7 +376,7 @@ fn escape_href(href: &str) -> String {
 }
 
 /// Collapse a string onto a single line — for headings and table cells.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -688,6 +707,72 @@ mod tests {
             ]),
             "![a \\[diagram\\]]()\n\n<!-- page 2 -->\n"
         );
+    }
+
+    /// Every block type, one document: blocks separated by exactly one blank
+    /// line, one newline at the end, and no trailing spaces except Markdown's
+    /// hard break.
+    #[test]
+    fn markdown_spacing_is_uniform() {
+        let rendered = md(vec![
+            Block::Heading {
+                level: 1,
+                text: Inline::text("Title"),
+            },
+            Block::paragraph("body"),
+            Block::List {
+                ordered: false,
+                items: vec![vec![Block::paragraph("one")], vec![Block::paragraph("two")]],
+            },
+            Block::Table {
+                header: Some(Row::from_texts(["a", "b"])),
+                rows: vec![Row::from_texts(["1", "2"])],
+            },
+            Block::Code {
+                lang: None,
+                text: "code".into(),
+            },
+            // Renders to nothing, and must not leave a gap behind it.
+            Block::Image { alt: None },
+            Block::PageBreak { page: 2 },
+            Block::paragraph("after the break"),
+        ]);
+
+        assert!(
+            !rendered.contains("\n\n\n"),
+            "blank lines pile up:\n{rendered}"
+        );
+        assert!(rendered.ends_with("break\n"));
+        for line in rendered.lines() {
+            assert!(
+                line == line.trim_end() || line.ends_with("  "),
+                "trailing space on {line:?}"
+            );
+        }
+    }
+
+    /// The offsets `chunk` builds on must point at the same Markdown a plain
+    /// render prints.
+    #[test]
+    fn block_ranges_slice_the_rendered_markdown() {
+        let blocks = vec![
+            Block::Heading {
+                level: 2,
+                text: Inline::text("Section"),
+            },
+            Block::Image { alt: None },
+            Block::paragraph("body"),
+        ];
+        let (body, ranges) = markdown_with_ranges(&blocks);
+        let rendered = to_markdown(&doc(blocks), &RenderOpts::default());
+
+        assert_eq!(ranges.len(), 3);
+        assert!(ranges[1].is_none(), "an empty block occupies no range");
+        for (start, end) in ranges.iter().flatten() {
+            assert_eq!(body[*start..*end], rendered[*start..*end]);
+        }
+        let (start, end) = ranges[2].unwrap();
+        assert_eq!(&rendered[start..end], "body");
     }
 
     #[test]

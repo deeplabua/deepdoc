@@ -30,6 +30,8 @@ markup5ever_rcdom = "0.39"                              # MIT OR Apache-2.0
 pdf-extract = "0.12"                                    # MIT
 pulldown-cmark = { version = "0.13", default-features = false }  # MIT
 quick-xml = "0.41"                                      # MIT
+# Batch extraction across cores. Pure Rust, no C, work-stealing only.
+rayon = "1.11"                                          # MIT OR Apache-2.0
 serde = { version = "1.0", features = ["derive"] }      # MIT OR Apache-2.0
 serde_json = "1.0"                                      # MIT OR Apache-2.0
 thiserror = "2.0"                                       # MIT OR Apache-2.0

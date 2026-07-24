@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use deepdoc_core::chunk::{ChunkOpts, chunk};
+use anyhow::{Context, Result, anyhow};
+use deepdoc_core::chunk::{Chunk, ChunkOpts, chunk};
 use deepdoc_core::extract::{ExtractOpts, PageRange, extract_path};
 use deepdoc_core::render::{OutputFormat, RenderOpts, render};
 use deepdoc_core::{Document, exit_code};
+use rayon::prelude::*;
 
-use crate::args::Args;
+use crate::args::{Args, Format};
 use crate::log::{Level, Logger};
 
 /// One input file and where its output goes, relative to `-o` (batch mode).
@@ -19,6 +20,36 @@ struct Job {
     relative: PathBuf,
     /// Output path under `-o`, with the extension of the chosen format.
     target: PathBuf,
+    /// True when a directory walk found this file rather than the command line
+    /// naming it. A walked folder holds whatever it holds, so "unsupported" or
+    /// "no text" is a skip there; for a file the user named, it is a failure.
+    discovered: bool,
+}
+
+/// A problem found while listing the inputs, before anything was extracted.
+struct Problem {
+    error: anyhow::Error,
+    /// Skips are reported and counted; failures also set the exit code.
+    skip: bool,
+}
+
+/// What became of one job.
+enum Outcome {
+    /// Written to this path.
+    Written(PathBuf),
+    /// Rendered, still waiting to go to stdout in input order.
+    Printed(String),
+    Skipped(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+/// Everything the per-file work needs; shared across the worker threads.
+struct Run<'a> {
+    args: &'a Args,
+    extract_opts: ExtractOpts,
+    render_opts: RenderOpts,
+    format: OutputFormat,
+    output_is_dir: bool,
 }
 
 /// Run the whole invocation and return the process exit code.
@@ -28,14 +59,10 @@ pub fn run(args: &Args) -> Result<i32> {
     let extract_opts = ExtractOpts {
         pages: args.pages.as_deref().map(PageRange::parse).transpose()?,
     };
-    let render_opts = RenderOpts {
-        metadata: args.metadata,
-    };
-    let format: OutputFormat = args.format.into();
 
-    let mut jobs = collect_jobs(args)?;
+    let (mut jobs, problems) = collect_jobs(args);
     assign_targets(&mut jobs, output_extension(args));
-    if jobs.is_empty() {
+    if jobs.is_empty() && problems.is_empty() {
         logger.warn("nothing to extract");
         return Ok(exit_code::OK);
     }
@@ -46,79 +73,203 @@ pub fn run(args: &Args) -> Result<i32> {
         logger.verbose("writing every document to stdout; use -o <dir> to split them into files");
     }
 
-    let mut failures = 0usize;
-    let mut first_failure_code = None;
+    let context = Run {
+        args,
+        extract_opts,
+        render_opts: RenderOpts {
+            metadata: args.metadata,
+        },
+        format: args.format.into(),
+        output_is_dir,
+    };
 
-    for job in &jobs {
-        match extract_one(job, &extract_opts, format, &render_opts, args) {
-            Ok(rendered) => {
-                write_output(job, &rendered, args, output_is_dir, &logger)?;
+    // Files are extracted in parallel but reported in input order: a batch that
+    // shuffled its stdout or its log from run to run would not be the
+    // deterministic tool the spec promises.
+    let outcomes: Vec<Outcome> = jobs.par_iter().map(|job| process(job, &context)).collect();
+
+    let mut extracted = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut first_failure = None;
+    let mut first_skip = None;
+
+    for problem in &problems {
+        if problem.skip {
+            skipped += 1;
+            first_skip.get_or_insert(exit_code_for(&problem.error));
+            logger.warn(format!("skipped {:#}", problem.error));
+        } else {
+            failed += 1;
+            first_failure.get_or_insert(exit_code_for(&problem.error));
+            logger.error(format!("{:#}", problem.error));
+        }
+    }
+
+    for (job, outcome) in jobs.iter().zip(outcomes) {
+        match outcome {
+            Outcome::Written(target) => {
+                extracted += 1;
+                logger.info(format!("{} → {}", job.path.display(), target.display()));
             }
-            Err(error) => {
-                failures += 1;
-                let code = exit_code_for(&error);
-                first_failure_code.get_or_insert(code);
-                logger.error(format!("{}: {error:#}", job.path.display()));
+            Outcome::Printed(text) => {
+                extracted += 1;
+                let mut stdout = std::io::stdout().lock();
+                stdout
+                    .write_all(text.as_bytes())
+                    .context("cannot write to stdout")?;
+            }
+            Outcome::Skipped(error) => {
+                skipped += 1;
+                first_skip.get_or_insert(exit_code_for(&error));
+                logger.warn(format!("skipped {error:#}"));
+            }
+            Outcome::Failed(error) => {
+                failed += 1;
+                first_failure.get_or_insert(exit_code_for(&error));
+                logger.error(format!("{error:#}"));
             }
         }
     }
 
-    let extracted = jobs.len() - failures;
-    if jobs.len() > 1 {
-        logger.info(format!("{extracted} extracted, {failures} failed"));
+    if jobs.len() + problems.len() > 1 {
+        logger.info(summary(extracted, skipped, failed));
     }
 
-    Ok(first_failure_code.unwrap_or(exit_code::OK))
+    // A batch survives its skips, but a run that produced nothing should not
+    // claim success — then the first skip decides the code (4 scan / 5 type).
+    let code = first_failure
+        .or_else(|| (extracted == 0).then_some(first_skip).flatten())
+        .unwrap_or(exit_code::OK);
+    Ok(code)
+}
+
+/// Extract, render and deliver one file.
+fn process(job: &Job, context: &Run) -> Outcome {
+    match extract_one(job, context).and_then(|rendered| write_output(job, &rendered, context)) {
+        Ok(outcome) => outcome,
+        Err(error) if job.discovered && is_skip(&error) => Outcome::Skipped(error),
+        Err(error) => Outcome::Failed(error),
+    }
 }
 
 /// Extract a single file and render it.
-fn extract_one(
-    job: &Job,
-    extract_opts: &ExtractOpts,
-    format: OutputFormat,
-    render_opts: &RenderOpts,
-    args: &Args,
-) -> Result<String> {
-    let doc: Document = extract_path(&job.path, extract_opts)?;
+fn extract_one(job: &Job, context: &Run) -> Result<String> {
+    let args = context.args;
+    let doc: Document = extract_path(&job.path, &context.extract_opts)?;
 
     if let Some(size) = args.chunk_size() {
         let opts = ChunkOpts {
             size,
             overlap: args.chunk_overlap,
         };
-        let chunks = chunk(&doc, &opts);
-        // TODO(Phase 6): chunks in Markdown/text output too, not just JSON.
-        let value = serde_json::json!({
-            "source": job.path.display().to_string(),
-            "metadata": doc.meta,
-            "chunks": chunks,
-        });
-        return Ok(format!("{value}\n"));
+        return Ok(render_chunks(
+            &chunk(&doc, &opts),
+            &doc,
+            &job.path,
+            args.format,
+        ));
     }
 
-    let mut rendered = render(&doc, format, render_opts);
+    let mut rendered = render(&doc, context.format, &context.render_opts);
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }
     Ok(rendered)
 }
 
+/// Serialize chunks in the requested output format.
+///
+/// JSON is the shape integrations consume (`docs/PRD/02-cli-spec.md`); the
+/// Markdown and text forms print the same chunks with a separator, so a human
+/// can see where the splitter cut before feeding a pipeline.
+fn render_chunks(chunks: &[Chunk], doc: &Document, path: &Path, format: Format) -> String {
+    if let Format::Json = format {
+        let value = serde_json::json!({
+            "source": path.display().to_string(),
+            "meta": doc.meta,
+            "chunks": chunks,
+        });
+        return format!("{value}\n");
+    }
+
+    let mut out = String::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let (start, end) = chunk.byte_range;
+        let path = chunk.heading_path.join(" > ");
+        let label = format!(
+            "chunk {}/{} | {} | bytes {start}-{end}",
+            index + 1,
+            chunks.len(),
+            if path.is_empty() { "—" } else { &path },
+        );
+        out.push_str(&match format {
+            Format::Md => format!("<!-- {label} -->\n\n"),
+            _ => format!("-- {label} --\n\n"),
+        });
+        out.push_str(chunk.text.trim_end());
+        out.push_str("\n\n");
+    }
+    out
+}
+
+/// Whether an error means "not something to extract here" rather than a failure.
+fn is_skip(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<deepdoc_core::Error>(),
+        Some(
+            deepdoc_core::Error::Unsupported { .. }
+                | deepdoc_core::Error::NotImplemented { .. }
+                | deepdoc_core::Error::NoText { .. }
+        )
+    )
+}
+
+/// The end-of-run tally from the spec.
+fn summary(extracted: usize, skipped: usize, failed: usize) -> String {
+    let mut line = format!("{extracted} extracted, {skipped} skipped");
+    if failed > 0 {
+        line.push_str(&format!(", {failed} failed"));
+    }
+    // The tick claims a good run; a batch that produced nothing has not had one.
+    if failed == 0 && extracted > 0 {
+        line.insert_str(0, "✓ ");
+    }
+    line
+}
+
 /// Expand the command line into the list of files to process.
-fn collect_jobs(args: &Args) -> Result<Vec<Job>> {
+///
+/// Listing problems are collected rather than raised: one unreadable folder in
+/// a tree must not cost the user every other document in it.
+fn collect_jobs(args: &Args) -> (Vec<Job>, Vec<Problem>) {
     let mut jobs = Vec::new();
+    let mut problems = Vec::new();
 
     for input in &args.inputs {
-        let meta =
-            std::fs::metadata(input).with_context(|| format!("cannot read {}", input.display()))?;
+        let meta = match std::fs::metadata(input) {
+            Ok(meta) => meta,
+            Err(error) => {
+                problems.push(Problem {
+                    error: anyhow!("cannot read {}: {error}", input.display()),
+                    skip: false,
+                });
+                continue;
+            }
+        };
 
         if meta.is_dir() {
-            if !args.recursive {
-                bail!(
-                    "{} is a directory — pass --recursive to walk it",
-                    input.display()
-                );
+            if args.recursive {
+                collect_dir(input, input, &mut jobs, &mut problems);
+            } else {
+                problems.push(Problem {
+                    error: anyhow!(
+                        "{} is a directory — pass --recursive to walk it",
+                        input.display()
+                    ),
+                    skip: false,
+                });
             }
-            collect_dir(input, input, &mut jobs)?;
         } else {
             let relative = input
                 .file_name()
@@ -128,37 +279,49 @@ fn collect_jobs(args: &Args) -> Result<Vec<Job>> {
                 path: input.clone(),
                 relative,
                 target: PathBuf::new(),
+                discovered: false,
             });
         }
     }
 
+    // Walk order is whatever the filesystem hands back; sorting here is what
+    // makes two runs over the same tree print the same thing.
     jobs.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(jobs)
+    (jobs, problems)
 }
 
 /// Walk `dir`, recording every file relative to `root`.
-// TODO(Phase 6): parallel batch (rayon) and the per-file progress report from the spec.
-fn collect_dir(root: &Path, dir: &Path, jobs: &mut Vec<Job>) -> Result<()> {
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+fn collect_dir(root: &Path, dir: &Path, jobs: &mut Vec<Job>, problems: &mut Vec<Problem>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            problems.push(Problem {
+                error: anyhow!("cannot read {}: {error}", dir.display()),
+                skip: true,
+            });
+            return;
+        }
+    };
 
     for entry in entries {
-        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
 
         if file_type.is_dir() {
-            collect_dir(root, &path, jobs)?;
+            collect_dir(root, &path, jobs, problems);
         } else if file_type.is_file() {
             let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
             jobs.push(Job {
                 path,
                 relative,
                 target: PathBuf::new(),
+                discovered: true,
             });
         }
     }
-    Ok(())
 }
 
 /// Decide where each job's output goes.
@@ -189,23 +352,13 @@ fn assign_targets(jobs: &mut [Job], extension: &str) {
     }
 }
 
-/// Write a rendered document to stdout or to the output path.
-fn write_output(
-    job: &Job,
-    rendered: &str,
-    args: &Args,
-    output_is_dir: bool,
-    logger: &Logger,
-) -> Result<()> {
-    let Some(output) = args.output.as_ref() else {
-        let mut stdout = std::io::stdout().lock();
-        stdout
-            .write_all(rendered.as_bytes())
-            .context("cannot write to stdout")?;
-        return Ok(());
+/// Write a rendered document, or hand it back for stdout.
+fn write_output(job: &Job, rendered: &str, context: &Run) -> Result<Outcome> {
+    let Some(output) = context.args.output.as_ref() else {
+        return Ok(Outcome::Printed(rendered.to_string()));
     };
 
-    let target = if output_is_dir {
+    let target = if context.output_is_dir {
         output.join(&job.target)
     } else {
         output.clone()
@@ -218,15 +371,12 @@ fn write_output(
     std::fs::write(&target, rendered)
         .with_context(|| format!("cannot write {}", target.display()))?;
 
-    logger.info(format!("{} → {}", job.path.display(), target.display()));
-    Ok(())
+    Ok(Outcome::Written(target))
 }
 
 /// File extension for the chosen output format.
 fn output_extension(args: &Args) -> &'static str {
-    use crate::args::Format;
     match args.format {
-        _ if args.chunk_size().is_some() => "json",
         Format::Md => "md",
         Format::Json => "json",
         Format::Text => "txt",
