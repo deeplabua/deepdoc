@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ homepage = "https://github.com/deeplabua/deepdoc"
 authors = ["DeepLab"]
 
 [workspace.dependencies]
-deepdoc-core = { version = "0.1.1", path = "crates/core" }
+deepdoc-core = { version = "0.2.0", path = "crates/core" }
 
 # All dependencies must be permissive (MIT / Apache-2.0 / BSD / MPL / Zlib).
 # No GPL/AGPL/commercial-only crates — check the licence before adding one.
@@ -34,6 +34,8 @@ quick-xml = "0.41"                                      # MIT
 rayon = "1.11"                                          # MIT OR Apache-2.0
 serde = { version = "1.0", features = ["derive"] }      # MIT OR Apache-2.0
 serde_json = "1.0"                                      # MIT OR Apache-2.0
+# Chunk content hashes. RustCrypto: pure Rust, no C, no `-sys` transitives.
+sha2 = "0.10"                                           # MIT OR Apache-2.0
 thiserror = "2.0"                                       # MIT OR Apache-2.0
 # OOXML/ODF/EPUB containers. Only `deflate` — the other backends (bzip2, lzma,
 # zstd) are C bindings, and a zero-C-dependency binary is the whole promise.

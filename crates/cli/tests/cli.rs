@@ -57,6 +57,7 @@ fn help_lists_the_documented_flags() {
         "--recursive",
         "--pages",
         "--metadata",
+        "--manifest",
         "--chunk",
         "--chunk-overlap",
         "--quiet",
@@ -599,10 +600,74 @@ fn chunk_json_carries_the_documented_schema() {
         assert!(chunk["heading_path"].is_array());
         assert_eq!(chunk["source"], file.display().to_string());
         assert_eq!(chunk["byte_range"].as_array().unwrap().len(), 2);
+
+        let hash = chunk["hash"].as_str().expect("every chunk carries a hash");
+        let hex = hash.strip_prefix("sha256:").expect("a prefixed hash");
+        assert_eq!(hex.len(), 64, "{hash}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{hash}");
     }
     assert_eq!(
         chunks.last().unwrap()["heading_path"],
         serde_json::json!(["Handbook", "Payroll"])
+    );
+}
+
+/// The hash exists so an index can tell what a re-extraction actually changed:
+/// the same document must hash the same, run after run.
+#[test]
+fn chunk_hashes_are_stable_across_runs() {
+    let dir = TempDir::new("chunkhash");
+    let file = dir.write(
+        "handbook.md",
+        "# Handbook\n\n## Onboarding\n\nYour first day is mostly paperwork.\n\n\
+         ## Payroll\n\nSalaries are paid monthly.\n",
+    );
+    let args = [
+        file.as_os_str(),
+        "--chunk".as_ref(),
+        "40".as_ref(),
+        "--format".as_ref(),
+        "json".as_ref(),
+    ];
+
+    let hashes = |output: Output| -> Vec<String> {
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        json["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["hash"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let first = hashes(deepdoc(args));
+    assert!(first.len() > 1);
+    assert_eq!(first, hashes(deepdoc(args)));
+
+    // Re-filing the same sentences under a different heading is a different
+    // chunk in an index, and the hash has to say so.
+    let moved = dir.write(
+        "moved.md",
+        "# Handbook\n\n## Onboarding\n\nYour first day is mostly paperwork.\n\n\
+         ## Benefits\n\nSalaries are paid monthly.\n",
+    );
+    let after = hashes(deepdoc([
+        moved.as_os_str(),
+        "--chunk".as_ref(),
+        "40".as_ref(),
+        "--format".as_ref(),
+        "json".as_ref(),
+    ]));
+    assert_eq!(first.len(), after.len());
+    assert_eq!(
+        first.first(),
+        after.first(),
+        "the untouched section should keep its hash"
+    );
+    assert_ne!(
+        first.last(),
+        after.last(),
+        "the same text under a new heading must hash differently"
     );
 }
 
@@ -655,6 +720,192 @@ fn chunked_markdown_shows_where_the_cuts_are() {
         "unexpected output:\n{rendered}"
     );
     assert!(rendered.contains("Salaries are paid monthly."));
+
+    // "Which chunk is this?" has to be answerable in every format, so the
+    // header carries a short form of the same hash JSON prints in full.
+    let json = deepdoc([
+        file.as_os_str(),
+        "--chunk".as_ref(),
+        "45".as_ref(),
+        "--format".as_ref(),
+        "json".as_ref(),
+    ]);
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    for chunk in json["chunks"].as_array().unwrap() {
+        let hash = chunk["hash"].as_str().unwrap();
+        let short = format!("{}…", &hash["sha256:".len()..][..12]);
+        assert!(
+            rendered.contains(&format!("| sha256:{short} -->")),
+            "the header should carry sha256:{short}:\n{rendered}"
+        );
+    }
+}
+
+/// Read a manifest and key it by the input's file name, so a test can talk
+/// about `scan.pdf` without spelling out the temp directory.
+fn manifest_by_name(path: &Path) -> std::collections::HashMap<String, serde_json::Value> {
+    let text = std::fs::read_to_string(path).expect("the manifest should exist");
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("the manifest must be a JSON array");
+    entries
+        .into_iter()
+        .map(|entry| {
+            let source = PathBuf::from(entry["source"].as_str().expect("source is a string"));
+            let name = source.file_name().unwrap().to_string_lossy().into_owned();
+            (name, entry)
+        })
+        .collect()
+}
+
+#[test]
+fn manifest_reports_a_status_and_a_reason_for_every_input() {
+    let dir = TempDir::new("manifest");
+    dir.write("handbook.md", "# Handbook\n\nWelcome aboard.\n");
+    // Short, but real text: "barely anything came out" must not read as a scan.
+    dir.write("terse.txt", "ok\n");
+    dir.write("mystery.bin", "\u{0}\u{1}\u{2}not a document");
+    std::fs::write(dir.path().join("scan.pdf"), minimal_pdf("")).unwrap();
+    let out = dir.path().join("out");
+    let manifest = dir.path().join("run.json");
+
+    let output = deepdoc([
+        dir.path().as_os_str(),
+        "--recursive".as_ref(),
+        "-o".as_ref(),
+        out.as_os_str(),
+        "--manifest".as_ref(),
+        manifest.as_os_str(),
+    ]);
+    // A report, not a policy: two skips in a batch still exit 0.
+    assert_eq!(output.status.code(), Some(0));
+
+    let entries = manifest_by_name(&manifest);
+    assert_eq!(entries.len(), 4, "every input gets an entry: {entries:?}");
+
+    assert_eq!(entries["handbook.md"]["status"], "extracted");
+    assert_eq!(entries["handbook.md"]["format"], "markdown");
+    assert!(
+        entries["handbook.md"].get("reason").is_none(),
+        "an extracted file has nothing to explain"
+    );
+
+    assert_eq!(entries["terse.txt"]["status"], "extracted");
+    assert!(entries["terse.txt"].get("reason").is_none());
+
+    // The distinction the manifest exists for: route this one to OCR…
+    assert_eq!(entries["scan.pdf"]["status"], "skipped");
+    assert_eq!(entries["scan.pdf"]["reason"], "no_text_layer");
+    assert_eq!(entries["scan.pdf"]["format"], "pdf");
+    assert_eq!(entries["scan.pdf"]["output"], serde_json::Value::Null);
+
+    // …and leave this one alone.
+    assert_eq!(entries["mystery.bin"]["status"], "skipped");
+    assert_eq!(entries["mystery.bin"]["reason"], "unsupported_format");
+    assert_eq!(entries["mystery.bin"]["format"], serde_json::Value::Null);
+
+    // The loop this feature was asked for: exactly the scans, nothing else.
+    let scans: Vec<&String> = entries
+        .iter()
+        .filter(|(_, entry)| entry["reason"] == "no_text_layer")
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(scans, ["scan.pdf"]);
+}
+
+/// The reason `output` is in the schema at all: a pipeline must not have to
+/// re-derive the name, because `${name%.*}.md` loses one of a colliding pair.
+#[test]
+fn manifest_names_the_file_that_was_actually_written() {
+    let dir = TempDir::new("manifestcollide");
+    std::fs::write(
+        dir.path().join("report.pdf"),
+        minimal_pdf("BT /F1 10 Tf 72 720 Td (Revenue grew.) Tj ET\n"),
+    )
+    .unwrap();
+    let document = r#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:r><w:t>Body text.</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+    std::fs::write(
+        dir.path().join("report.docx"),
+        minimal_zip(&[("word/document.xml", document)]),
+    )
+    .unwrap();
+    dir.write("notes.txt", "unique stem");
+    let out = dir.path().join("out");
+    let manifest = dir.path().join("run.json");
+
+    let output = deepdoc([
+        dir.path().as_os_str(),
+        "--recursive".as_ref(),
+        "-o".as_ref(),
+        out.as_os_str(),
+        "--manifest".as_ref(),
+        manifest.as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+
+    let entries = manifest_by_name(&manifest);
+    for (input, written) in [
+        ("report.pdf", "report.pdf.md"),
+        ("report.docx", "report.docx.md"),
+        ("notes.txt", "notes.md"),
+    ] {
+        let reported = entries[input]["output"].as_str().expect("an output path");
+        assert_eq!(
+            PathBuf::from(reported),
+            out.join(written),
+            "{input} should report the name the batch really chose"
+        );
+        assert!(
+            PathBuf::from(reported).is_file(),
+            "{reported} should exist on disk"
+        );
+    }
+}
+
+/// Nothing was written, so there is nothing to point a pipeline at.
+#[test]
+fn manifest_reports_no_output_when_the_document_went_to_stdout() {
+    let dir = TempDir::new("manifeststdout");
+    let file = dir.write("notes.txt", "hello");
+    let manifest = dir.path().join("run.json");
+
+    let output = deepdoc([
+        file.as_os_str(),
+        "--manifest".as_ref(),
+        manifest.as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+
+    let entries = manifest_by_name(&manifest);
+    assert_eq!(entries.len(), 1, "a single input is an array of one");
+    assert_eq!(entries["notes.txt"]["status"], "extracted");
+    assert_eq!(entries["notes.txt"]["output"], serde_json::Value::Null);
+}
+
+/// A whole input that could never be listed has to appear too — otherwise the
+/// manifest says all is well about documents the run never saw.
+#[test]
+fn manifest_records_inputs_that_could_not_be_read() {
+    let dir = TempDir::new("manifestmissing");
+    let good = dir.write("notes.txt", "hello");
+    let missing = dir.path().join("nope.txt");
+    let manifest = dir.path().join("run.json");
+
+    let output = deepdoc([
+        missing.as_os_str(),
+        good.as_os_str(),
+        "--manifest".as_ref(),
+        manifest.as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let entries = manifest_by_name(&manifest);
+    assert_eq!(entries["nope.txt"]["status"], "error");
+    assert_eq!(entries["nope.txt"]["reason"], "io_error");
+    assert_eq!(entries["nope.txt"]["format"], serde_json::Value::Null);
+    assert_eq!(entries["notes.txt"]["status"], "extracted");
 }
 
 #[test]

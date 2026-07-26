@@ -17,8 +17,15 @@
 //! `byte_range` indexes the Markdown rendering of the document — exactly what
 //! `deepdoc file --format md` prints, without front matter — and slicing it with
 //! the range gives the chunk's text back.
+//!
+//! Every chunk also carries a `hash` of its own content, so an index can tell
+//! which chunks a parser upgrade actually changed instead of re-embedding a
+//! whole corpus. See [`chunk_hash`] for what goes into it.
+
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::model::{Block, Document};
 use crate::render;
@@ -59,6 +66,46 @@ pub struct Chunk {
     pub source: Option<String>,
     /// Byte range of the chunk inside the rendered Markdown.
     pub byte_range: (usize, usize),
+    /// Content hash, `"sha256:<hex>"` — see [`chunk_hash`].
+    pub hash: String,
+}
+
+/// Separator between the heading path's own entries.
+const PATH_SEPARATOR: char = '\u{1F}';
+/// Separator between the heading path and the text.
+const FIELD_SEPARATOR: char = '\u{1E}';
+
+/// The content hash of a chunk: `"sha256:<hex>"` over its heading path and its
+/// text together.
+///
+/// The point of the hash is to answer "did this chunk change?" without
+/// re-embedding a corpus. That question is about what the chunk *means* in an
+/// index, and a chunk's meaning is not only its text: the enclosing headings
+/// (`Handbook > Onboarding > Day one`) travel with it and sit **outside** `text`
+/// for every chunk that does not open with its own heading. A document
+/// reorganised under new headings gives the same text a different context — the
+/// exact case the hash exists to catch — so the path is hashed too.
+///
+/// The two parts are joined with the ASCII unit and record separators, which do
+/// not occur in extracted text, so no text can spell out a different split.
+pub fn chunk_hash(heading_path: &[String], text: &str) -> String {
+    let mut hasher = Sha256::new();
+    for (index, heading) in heading_path.iter().enumerate() {
+        if index > 0 {
+            hasher.update([PATH_SEPARATOR as u8]);
+        }
+        hasher.update(heading.as_bytes());
+    }
+    hasher.update([FIELD_SEPARATOR as u8]);
+    hasher.update(text.as_bytes());
+
+    let mut out = String::with_capacity("sha256:".len() + 64);
+    out.push_str("sha256:");
+    for byte in hasher.finalize() {
+        // Writing into a String cannot fail.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Split a document into chunks. Pure.
@@ -82,12 +129,15 @@ pub fn chunk(doc: &Document, opts: &ChunkOpts) -> Vec<Chunk> {
             _ => overlap_start(&markdown, &segments, groups[position - 1].0, first, overlap),
         };
         let (from, to) = (segments[start].start, segments[end - 1].end);
+        let text = markdown[from..to].to_string();
+        // The path of the chunk's own first block: text pulled in as overlap
+        // belongs to the chunk before it.
+        let heading_path = segments[first].path.clone();
 
         chunks.push(Chunk {
-            text: markdown[from..to].to_string(),
-            // The path of the chunk's own first block: text pulled in as
-            // overlap belongs to the chunk before it.
-            heading_path: segments[first].path.clone(),
+            hash: chunk_hash(&heading_path, &text),
+            text,
+            heading_path,
             source: source.clone(),
             byte_range: (from, to),
         });
@@ -575,6 +625,72 @@ mod tests {
         assert_eq!(chunks[0].source.as_deref(), Some("handbook.pdf"));
     }
 
+    #[test]
+    fn every_chunk_carries_a_sha256_hash() {
+        let doc = doc(vec![
+            heading(1, "Handbook"),
+            Block::paragraph("a".repeat(60)),
+            heading(2, "Payroll"),
+            Block::paragraph("b".repeat(60)),
+        ]);
+        let chunks = chunk(&doc, &opts(80, 0));
+
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            let hex = chunk.hash.strip_prefix("sha256:").expect("prefixed hash");
+            assert_eq!(hex.len(), 64, "{}", chunk.hash);
+            assert!(
+                hex.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
+        }
+    }
+
+    /// The whole point of the hash: the same input must give the same one, run
+    /// after run and process after process.
+    #[test]
+    fn the_hash_is_deterministic() {
+        let doc = doc(vec![
+            heading(2, "Payroll"),
+            Block::paragraph("Salaries are paid monthly."),
+        ]);
+        let first = chunk(&doc, &ChunkOpts::default());
+        let second = chunk(&doc, &ChunkOpts::default());
+
+        let hashes: Vec<&str> = first.iter().map(|c| c.hash.as_str()).collect();
+        let again: Vec<&str> = second.iter().map(|c| c.hash.as_str()).collect();
+        assert_eq!(hashes, again);
+        // And it is the hash of the fields, not of some run-local state.
+        assert_eq!(
+            first[0].hash,
+            chunk_hash(&first[0].heading_path, &first[0].text)
+        );
+    }
+
+    /// The heading path is part of a chunk's identity: reorganising a document
+    /// changes what the same sentence means in an index, and that has to show.
+    #[test]
+    fn moving_a_chunk_under_a_new_heading_changes_the_hash() {
+        let text = "Salaries are paid monthly.";
+        let under_payroll = chunk_hash(&["Handbook".into(), "Payroll".into()], text);
+        let under_benefits = chunk_hash(&["Handbook".into(), "Benefits".into()], text);
+        assert_ne!(under_payroll, under_benefits);
+
+        // And the path is hashed as a path, not as a run of concatenated words:
+        // splitting one heading in two is a different chunk.
+        assert_ne!(
+            chunk_hash(&["Handbook".into(), "Payroll".into()], text),
+            chunk_hash(&["HandbookPayroll".into()], text)
+        );
+    }
+
+    #[test]
+    fn the_same_text_under_the_same_path_hashes_the_same() {
+        let path = vec!["Handbook".to_string()];
+        assert_eq!(chunk_hash(&path, "hello"), chunk_hash(&path, "hello"));
+        assert_ne!(chunk_hash(&path, "hello"), chunk_hash(&path, "hello "));
+    }
+
     /// The chunk JSON schema is a public contract — this is what breaks when a
     /// field is renamed.
     #[test]
@@ -584,6 +700,7 @@ mod tests {
             heading_path: vec!["Introduction".into()],
             source: Some("paper.pdf".into()),
             byte_range: (0, 5),
+            hash: chunk_hash(&["Introduction".to_string()], "Body."),
         };
         assert_eq!(
             serde_json::to_value(&chunk).unwrap(),
@@ -592,6 +709,8 @@ mod tests {
                 "heading_path": ["Introduction"],
                 "source": "paper.pdf",
                 "byte_range": [0, 5],
+                // sha256 of "Introduction\u{1E}Body." — the path, then the text.
+                "hash": "sha256:4e9b39d64994e392fa7a19bc795b4272591d5442c2fc6b90ec432ff2bbf9efe9",
             })
         );
     }

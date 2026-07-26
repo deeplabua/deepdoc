@@ -31,6 +31,10 @@ pub struct Args {
     #[arg(long)]
     pub recursive: bool,
 
+    /// Write a JSON per-file status report for the whole run to PATH.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
+
     /// Page range for paginated formats: `1-10`, `3`, `2-`.
     #[arg(long, value_name = "RANGE")]
     pub pages: Option<String>,

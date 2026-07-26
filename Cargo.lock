@@ -341,18 +341,19 @@ checksum = "7eed2c4702fa172d1ce21078faa7c5203e69f5394d48cc436d25928394a867a2"
 
 [[package]]
 name = "deepdoc"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "deepdoc-core",
  "rayon",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "deepdoc-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "calamine",
  "csv",
@@ -363,6 +364,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "zip",
 ]

@@ -2,6 +2,7 @@
 
 mod args;
 mod log;
+mod manifest;
 mod run;
 
 use clap::Parser;

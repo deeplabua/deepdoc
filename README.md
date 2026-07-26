@@ -74,9 +74,18 @@ Batch a whole folder (mirrors the tree into an output dir):
 deepdoc ./docs --recursive -o out/
 ```
 
+Include document metadata as YAML front-matter, or extract a PDF page range:
+
+```sh
+deepdoc paper.pdf --metadata
+deepdoc big.pdf --pages 1-10
+```
+
+The original file is never modified — DeepDoc only reads.
+
 Chunk for a RAG pipeline. Chunks are cut on block boundaries — never through a paragraph or
-a table — and each one carries the chain of headings it sits under, plus a byte range into
-the Markdown it came from:
+a table — and each one carries the chain of headings it sits under, a byte range into the
+Markdown it came from, and a content hash:
 
 ```sh
 deepdoc handbook.pdf --chunk 800 --format json
@@ -93,20 +102,77 @@ deepdoc handbook.pdf --chunk 800          # same chunks as Markdown, with the cu
       "text": "## Onboarding\n\nYour first day is mostly paperwork…",
       "heading_path": ["Handbook", "Onboarding"],
       "source": "handbook.pdf",
-      "byte_range": [1043, 1802]
+      "byte_range": [1043, 1802],
+      "hash": "sha256:4e9b39d64994e392fa7a19bc795b4272591d5442c2fc6b90ec432ff2bbf9efe9"
     }
   ]
 }
 ```
 
-Include document metadata as YAML front-matter, or extract a PDF page range:
+#### Chunk hashes
 
-```sh
-deepdoc paper.pdf --metadata
-deepdoc big.pdf --pages 1-10
+`hash` is `sha256` over the chunk's **heading path and text together** —
+`heading_path.join("\u{1F}") + "\u{1E}" + text`, with the ASCII unit and record separators as
+the boundary. It answers "did this chunk change?" after a parser upgrade, so you re-embed the
+chunks that moved instead of the whole corpus.
+
+The heading path is in the hash on purpose. A chunk only contains its own heading when it
+starts with one; for every other chunk the context (`Handbook > Onboarding > Day one`) lives
+*outside* `text`. Re-filing the same sentences under a new heading is exactly the case worth
+catching — hashing `text` alone would miss it.
+
+The Markdown and text forms print a short form of the same hash in the chunk header, so
+"which chunk is this?" is answerable in every format:
+
+```
+<!-- chunk 2/5 | Handbook > Payroll | bytes 296-390 | sha256:2b7c1d0f8a3e… -->
 ```
 
-The original file is never modified — DeepDoc only reads.
+### Machine-readable batch status (`--manifest`)
+
+Exit codes are a *process*-level signal: a batch that skipped three scans and extracted forty
+documents still exits 0 and explains itself in prose on stderr. To route just those three
+scans through OCR you would have to grep the log — or drive your own loop over the files, and
+a hand-rolled loop re-derives the output names, which is where `report.pdf` and `report.docx`
+quietly collapse into one `report.md`.
+
+`--manifest <path>` writes one JSON array for the whole run instead — every input, what
+happened to it, why, and the file that was actually written:
+
+```sh
+deepdoc ./corpus --recursive -o out/ --manifest run.json
+```
+
+```json
+[
+  { "source": "corpus/handbook.docx", "output": "out/handbook.md",
+    "status": "extracted", "format": "docx" },
+  { "source": "corpus/report.pdf", "output": "out/report.pdf.md",
+    "status": "extracted", "format": "pdf" },
+  { "source": "corpus/report.docx", "output": "out/report.docx.md",
+    "status": "extracted", "format": "docx" },
+  { "source": "corpus/scan.pdf", "output": null, "status": "skipped",
+    "reason": "no_text_layer", "format": "pdf" },
+  { "source": "corpus/notes.zip", "output": null, "status": "skipped",
+    "reason": "unsupported_format", "format": null }
+]
+```
+
+- `status` is `extracted`, `skipped` or `error`; `reason` (absent on `extracted`) is
+  `no_text_layer`, `unsupported_format`, `parse_error` or `io_error`.
+- `output` is the path DeepDoc really wrote, with colliding stems already resolved — never
+  compute it yourself.
+- `null` output means nothing was written: a skip, an error, or output going to stdout.
+- Inputs that could not even be listed (a missing path, an unreadable folder) get an entry too,
+  so the manifest never reports success for a branch of the tree the run never saw.
+- It is a report, not a policy: writing one changes no exit code and turns no skip into a
+  failure. Order is deterministic, and a single input gives an array of one.
+
+The routing loop it exists for — exactly the scans, nothing else:
+
+```sh
+jq -r '.[] | select(.reason=="no_text_layer") | .source' run.json | xargs -n1 deepocr
+```
 
 ### Scanned documents
 

@@ -13,6 +13,7 @@ use rayon::prelude::*;
 
 use crate::args::{Args, Format};
 use crate::log::{Level, Logger};
+use crate::manifest::{FileStatus, Reason, Status};
 
 /// One input file and where its output goes, relative to `-o` (batch mode).
 struct Job {
@@ -28,6 +29,8 @@ struct Job {
 
 /// A problem found while listing the inputs, before anything was extracted.
 struct Problem {
+    /// The path that could not be listed — what the manifest reports it as.
+    source: PathBuf,
     error: anyhow::Error,
     /// Skips are reported and counted; failures also set the exit code.
     skip: bool,
@@ -41,6 +44,14 @@ enum Outcome {
     Printed(String),
     Skipped(anyhow::Error),
     Failed(anyhow::Error),
+}
+
+/// One job's result, plus what the manifest needs beyond it.
+struct Report {
+    outcome: Outcome,
+    /// The detected format. Worth reporting even when extraction failed:
+    /// "this *pdf* is a scan" is the routing signal a manifest exists for.
+    format: Option<deepdoc_core::Format>,
 }
 
 /// Everything the per-file work needs; shared across the worker threads.
@@ -64,6 +75,9 @@ pub fn run(args: &Args) -> Result<i32> {
     assign_targets(&mut jobs, output_extension(args));
     if jobs.is_empty() && problems.is_empty() {
         logger.warn("nothing to extract");
+        // An empty run still has an answer, and a pipeline that reads the
+        // manifest should not have to handle the file not being there.
+        write_manifest(args, &[])?;
         return Ok(exit_code::OK);
     }
 
@@ -86,15 +100,29 @@ pub fn run(args: &Args) -> Result<i32> {
     // Files are extracted in parallel but reported in input order: a batch that
     // shuffled its stdout or its log from run to run would not be the
     // deterministic tool the spec promises.
-    let outcomes: Vec<Outcome> = jobs.par_iter().map(|job| process(job, &context)).collect();
+    let reports: Vec<Report> = jobs.par_iter().map(|job| process(job, &context)).collect();
 
     let mut extracted = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
     let mut first_failure = None;
     let mut first_skip = None;
+    // The manifest follows the same order as the log: listing problems first,
+    // then the files in walk order.
+    let mut statuses = Vec::with_capacity(problems.len() + jobs.len());
 
     for problem in &problems {
+        // A branch of the tree that could not be listed is an error in the
+        // manifest whether or not the run tolerated it — otherwise the report
+        // would say all is well about documents it never saw.
+        statuses.push(FileStatus {
+            source: problem.source.display().to_string(),
+            output: None,
+            status: Status::Error,
+            reason: Some(Reason::of(&problem.error)),
+            format: None,
+        });
+
         if problem.skip {
             skipped += 1;
             first_skip.get_or_insert(exit_code_for(&problem.error));
@@ -106,11 +134,21 @@ pub fn run(args: &Args) -> Result<i32> {
         }
     }
 
-    for (job, outcome) in jobs.iter().zip(outcomes) {
-        match outcome {
+    for (job, report) in jobs.iter().zip(reports) {
+        let source = job.path.display().to_string();
+        let format = report.format;
+
+        let status = match report.outcome {
             Outcome::Written(target) => {
                 extracted += 1;
                 logger.info(format!("{} → {}", job.path.display(), target.display()));
+                FileStatus {
+                    source,
+                    output: Some(target.display().to_string()),
+                    status: Status::Extracted,
+                    reason: None,
+                    format,
+                }
             }
             Outcome::Printed(text) => {
                 extracted += 1;
@@ -118,23 +156,49 @@ pub fn run(args: &Args) -> Result<i32> {
                 stdout
                     .write_all(text.as_bytes())
                     .context("cannot write to stdout")?;
+                // Extracted, but there is no file to point a pipeline at.
+                FileStatus {
+                    source,
+                    output: None,
+                    status: Status::Extracted,
+                    reason: None,
+                    format,
+                }
             }
             Outcome::Skipped(error) => {
                 skipped += 1;
                 first_skip.get_or_insert(exit_code_for(&error));
                 logger.warn(format!("skipped {error:#}"));
+                FileStatus {
+                    source,
+                    output: None,
+                    status: Status::Skipped,
+                    reason: Some(Reason::of(&error)),
+                    format,
+                }
             }
             Outcome::Failed(error) => {
                 failed += 1;
                 first_failure.get_or_insert(exit_code_for(&error));
                 logger.error(format!("{error:#}"));
+                FileStatus {
+                    source,
+                    output: None,
+                    status: Status::Error,
+                    reason: Some(Reason::of(&error)),
+                    format,
+                }
             }
-        }
+        };
+        statuses.push(status);
     }
 
     if jobs.len() + problems.len() > 1 {
         logger.info(summary(extracted, skipped, failed));
     }
+
+    // A report, not a policy: the manifest never changes the code below it.
+    write_manifest(args, &statuses)?;
 
     // A batch survives its skips, but a run that produced nothing should not
     // claim success — then the first skip decides the code (4 scan / 5 type).
@@ -145,37 +209,50 @@ pub fn run(args: &Args) -> Result<i32> {
 }
 
 /// Extract, render and deliver one file.
-fn process(job: &Job, context: &Run) -> Outcome {
-    match extract_one(job, context).and_then(|rendered| write_output(job, &rendered, context)) {
+fn process(job: &Job, context: &Run) -> Report {
+    let (result, format) = match extract_one(job, context) {
+        Ok((rendered, format)) => (write_output(job, &rendered, context), format),
+        // Extraction never got as far as a `Document`, so ask the detector
+        // directly rather than leave the manifest saying "format unknown" about
+        // a file whose type is exactly what makes the failure actionable.
+        Err(error) => (Err(error), detected_format(job, context)),
+    };
+
+    let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) if job.discovered && is_skip(&error) => Outcome::Skipped(error),
         Err(error) => Outcome::Failed(error),
-    }
+    };
+    Report { outcome, format }
 }
 
-/// Extract a single file and render it.
-fn extract_one(job: &Job, context: &Run) -> Result<String> {
+/// Sniff a file's type, for the manifest only — nothing else needs it, and it
+/// costs a second read of the file's head.
+fn detected_format(job: &Job, context: &Run) -> Option<deepdoc_core::Format> {
+    context.args.manifest.as_ref()?;
+    deepdoc_core::detect_path(&job.path).ok()
+}
+
+/// Extract a single file and render it, reporting the format it turned out to be.
+fn extract_one(job: &Job, context: &Run) -> Result<(String, Option<deepdoc_core::Format>)> {
     let args = context.args;
     let doc: Document = extract_path(&job.path, &context.extract_opts)?;
+    let format = doc.meta.source_format;
 
     if let Some(size) = args.chunk_size() {
         let opts = ChunkOpts {
             size,
             overlap: args.chunk_overlap,
         };
-        return Ok(render_chunks(
-            &chunk(&doc, &opts),
-            &doc,
-            &job.path,
-            args.format,
-        ));
+        let rendered = render_chunks(&chunk(&doc, &opts), &doc, &job.path, args.format);
+        return Ok((rendered, format));
     }
 
     let mut rendered = render(&doc, context.format, &context.render_opts);
     if !rendered.ends_with('\n') {
         rendered.push('\n');
     }
-    Ok(rendered)
+    Ok((rendered, format))
 }
 
 /// Serialize chunks in the requested output format.
@@ -198,10 +275,11 @@ fn render_chunks(chunks: &[Chunk], doc: &Document, path: &Path, format: Format) 
         let (start, end) = chunk.byte_range;
         let path = chunk.heading_path.join(" > ");
         let label = format!(
-            "chunk {}/{} | {} | bytes {start}-{end}",
+            "chunk {}/{} | {} | bytes {start}-{end} | {}",
             index + 1,
             chunks.len(),
             if path.is_empty() { "—" } else { &path },
+            short_hash(&chunk.hash),
         );
         out.push_str(&match format {
             Format::Md => format!("<!-- {label} -->\n\n"),
@@ -211,6 +289,31 @@ fn render_chunks(chunks: &[Chunk], doc: &Document, path: &Path, format: Format) 
         out.push_str("\n\n");
     }
     out
+}
+
+/// Write the run's per-file statuses, if `--manifest` asked for them.
+fn write_manifest(args: &Args, statuses: &[FileStatus]) -> Result<()> {
+    match args.manifest.as_deref() {
+        Some(path) => crate::manifest::write(path, statuses),
+        None => Ok(()),
+    }
+}
+
+/// How many hex characters of a chunk hash the human-readable formats show.
+///
+/// Nobody compares a full 64-character digest by eye, but printing nothing
+/// would make "which chunk is this?" answerable in JSON and not in Markdown.
+const SHORT_HASH_HEX: usize = 12;
+
+/// `sha256:2b7c1d0f8a3e…` — the chunk header's form of a hash.
+fn short_hash(hash: &str) -> String {
+    let Some((algorithm, hex)) = hash.split_once(':') else {
+        return hash.to_string();
+    };
+    match hex.char_indices().nth(SHORT_HASH_HEX) {
+        Some((cut, _)) => format!("{algorithm}:{}…", &hex[..cut]),
+        None => hash.to_string(),
+    }
 }
 
 /// Whether an error means "not something to extract here" rather than a failure.
@@ -251,6 +354,7 @@ fn collect_jobs(args: &Args) -> (Vec<Job>, Vec<Problem>) {
             Ok(meta) => meta,
             Err(error) => {
                 problems.push(Problem {
+                    source: input.clone(),
                     error: anyhow!("cannot read {}: {error}", input.display()),
                     skip: false,
                 });
@@ -263,6 +367,7 @@ fn collect_jobs(args: &Args) -> (Vec<Job>, Vec<Problem>) {
                 collect_dir(input, input, &mut jobs, &mut problems);
             } else {
                 problems.push(Problem {
+                    source: input.clone(),
                     error: anyhow!(
                         "{} is a directory — pass --recursive to walk it",
                         input.display()
@@ -296,6 +401,7 @@ fn collect_dir(root: &Path, dir: &Path, jobs: &mut Vec<Job>, problems: &mut Vec<
         Ok(entries) => entries,
         Err(error) => {
             problems.push(Problem {
+                source: dir.to_path_buf(),
                 error: anyhow!("cannot read {}: {error}", dir.display()),
                 skip: true,
             });

@@ -4,6 +4,56 @@ All notable changes to DeepDoc are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 — 2026-07-26
+
+Auditable ingestion: a parser upgrade now says which chunks it actually changed, and a batch now
+answers "what happened to every file?" in JSON instead of prose on stderr. Both came from
+engineers reading the launch write-up ([#1], [#2]).
+
+### Added
+
+- **A content hash on every chunk** ([#1]). `--chunk --format json` gives each chunk a
+  `hash: "sha256:<hex>"`, so re-extracting a corpus after a parser upgrade tells you which chunks
+  moved and which can keep their embeddings. The hash covers the chunk's **heading path and text
+  together** (`heading_path.join("\u{1F}") + "\u{1E}" + text`, the ASCII unit and record
+  separators as the boundary): a chunk only contains its own heading when it starts with one, so
+  for everything else the context lives outside `text`, and re-filing the same sentences under a
+  new heading — the exact case worth catching — would otherwise hash identically.
+- **`--manifest <path>`** ([#2]): one JSON array for the whole run naming, per input, its
+  `status` (`extracted` / `skipped` / `error`), the `reason` there is no output (`no_text_layer`,
+  `unsupported_format`, `parse_error`, `io_error`), the detected `format`, and the `output` file
+  that was actually written. Exit code 4 is a *process*-level signal, so routing scans to OCR
+  meant either grepping stderr or hand-rolling a loop over the files — and a hand-rolled loop
+  re-derives the output names, where `report.pdf` and `report.docx` collapse into one
+  `report.md`. `output` reports the name the batch really chose (`out/report.pdf.md`), so the
+  pipeline never computes it. Inputs that could not even be listed get an entry too. It works
+  without `--recursive` (an array of one), is deterministically ordered, and is a report, not a
+  policy: it changes no exit code and turns no skip into a failure.
+
+  ```sh
+  deepdoc ./corpus --recursive -o out/ --manifest run.json
+  jq -r '.[] | select(.reason=="no_text_layer") | .source' run.json | xargs -n1 deepocr
+  ```
+
+### Changed
+
+- **Breaking for `deepdoc-core` users**: `Chunk` has a new public field, `hash`, so code that
+  builds one with a struct literal (`Chunk { text, heading_path, source, byte_range }`) no longer
+  compiles. Add `hash: deepdoc_core::chunk::chunk_hash(&heading_path, &text)`. Reading chunks —
+  the common case — is unaffected.
+- The chunk header in `--format md` / `--format text` now carries a short form of the hash, so
+  "which chunk is this?" is answerable in every format, not only in JSON:
+  `<!-- chunk 2/5 | Handbook > Payroll | bytes 296-390 | sha256:2b7c1d0f8a3e… -->`.
+
+### Notes
+
+- `sha2` (RustCrypto) does the hashing: pure Rust, MIT OR Apache-2.0, and already in the graph
+  behind the PDF reader — the dependency tree gained no new crates, and still contains no C or
+  `-sys` crates.
+
+[#1]: https://github.com/deeplabua/deepdoc/issues/1
+[#2]: https://github.com/deeplabua/deepdoc/issues/2
+
 ## 0.1.1 — 2026-07-26
 
 ### Changed
