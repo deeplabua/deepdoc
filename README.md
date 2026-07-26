@@ -186,8 +186,55 @@ deepocr scan.pdf -o scan.ocr.pdf   # invisible text layer over the page image
 deepdoc scan.ocr.pdf               # now it is born-digital — parse as usual
 ```
 
-OCR stays deliberately **outside** DeepDoc: recognition is a probabilistic step, and mixing it
-into a deterministic parser would cost the property this tool is built on.
+OCR stays deliberately **outside** DeepDoc's released binaries: recognition is a probabilistic
+step, and mixing it into a deterministic parser would cost the property this tool is built on.
+The models alone are 12 MB against a 3.8 MB binary, and there is no way to ship "brew with
+models, crates.io without" — so everyone would pay for a feature most runs never use.
+
+#### One command instead of two (`--ocr`, opt-in at build time)
+
+If you would rather have it in one command, build it in. The flag is off by default and absent
+from every released binary:
+
+```sh
+cargo install deepdoc --features ocr-fetch-models
+deepdoc scan.pdf --ocr
+```
+
+| Feature | What you get |
+| --- | --- |
+| `ocr` | Recognition, models supplied by you via `--ocr-model <dir>` or `DEEPOCR_MODEL_DIR`. No weights in the binary, no network stack in the graph — the air-gapped and reproducible-build option. |
+| `ocr-fetch-models` | The above, plus downloading the weights into the user cache on first run. This is the **only** build of DeepDoc that ever touches the network. |
+
+The weights live outside the binary either way. DeepOCR ships them, so
+`--ocr-model /path/to/deepocr/models` works if you already have that tool.
+
+`--ocr` also makes standalone scans readable — a `.png`, `.jpg` or `.tiff` is not a document to
+DeepDoc, but it is a page to DeepOCR:
+
+```sh
+deepdoc ./scans --recursive -o out/ --ocr --manifest run.json
+```
+
+Three things worth knowing:
+
+- **It is an extra attempt, never a new failure mode.** If recognition cannot help — the file is
+  not a page at all — the original verdict stands, so a batch that skipped a file without `--ocr`
+  skips it with `--ocr` too, for the same reason.
+- **The manifest says so.** A file whose text was recognised rather than read carries
+  `"ocr": true`. Deterministically parsed text and OCR output are not the same evidence, and an
+  index audit needs to tell them apart. The field is absent on every other row, so a run without
+  `--ocr` emits exactly the schema it did before.
+- **Determinism is suspended for the pages it touches**, and the run says so on stderr. Everything
+  else in DeepDoc is still byte-for-byte reproducible.
+
+Recognition happens entirely in memory: the page is recognised into a searchable PDF that never
+reaches the filesystem, then parsed by DeepDoc's ordinary PDF reader — which is how an OCR'd scan
+gets the same reading-order, column and heading handling as any born-digital file.
+
+A document that yields *some* text is not a candidate: `--ocr` triggers on a file that gives
+nothing at all, so a mostly-text PDF with one scanned page inside it still extracts the text it
+has and leaves that page alone. Run such a file through `deepocr` directly.
 
 ### Supported inputs (v0.1)
 
@@ -212,8 +259,8 @@ detection. Everything runs in-process — nothing is uploaded and nothing is she
 
 DeepDoc extracts **born-digital** documents (real embedded text). Scanned pages and images go
 through [DeepOCR](https://github.com/deeplabua/deepocr) first (see
-[Scanned documents](#scanned-documents)); a `--ocr` feature that links its engine straight in
-is planned, off by default so the default binary stays small and model-free.
+[Scanned documents](#scanned-documents)), or through the opt-in `--ocr` build feature that links
+its engine straight in — off by default, so the released binary stays small and model-free.
 High-fidelity table recovery from complex/scanned PDFs
 is where ML parsers (Docling, Marker) win — DeepDoc's lane is speed, determinism, and zero
 dependencies on the clean majority.

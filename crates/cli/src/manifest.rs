@@ -44,6 +44,20 @@ pub struct FileStatus {
     pub reason: Option<Reason>,
     /// The detected format, or `null` when detection did not recognise the file.
     pub format: Option<Format>,
+    /// True when this file's text was **recognised** rather than read (`--ocr`).
+    ///
+    /// Absent otherwise, so a run without `--ocr` emits exactly the schema it
+    /// did before the flag existed. An index audit needs this: deterministically
+    /// parsed text and OCR output are not the same evidence, and a chunk hash
+    /// that changed because a page was recognised differently is a different
+    /// story from one that changed because the parser improved.
+    #[serde(skip_serializing_if = "not")]
+    pub ocr: bool,
+}
+
+/// `skip_serializing_if` needs a function over a reference.
+fn not(flag: &bool) -> bool {
+    !*flag
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -114,6 +128,7 @@ mod tests {
             status: Status::Skipped,
             reason,
             format: Some(Format::Pdf),
+            ocr: false,
         }
     }
 
@@ -127,6 +142,7 @@ mod tests {
             status: Status::Extracted,
             reason: None,
             format: Some(Format::Docx),
+            ocr: false,
         };
         assert_eq!(
             serde_json::to_value([extracted, status(Some(Reason::NoTextLayer))]).unwrap(),
@@ -145,6 +161,34 @@ mod tests {
                     "format": "pdf",
                 },
             ])
+        );
+    }
+
+    /// A run without `--ocr` must serialize exactly what it did before the flag
+    /// existed — the field only appears on files that were actually recognised.
+    #[test]
+    fn the_ocr_field_appears_only_when_ocr_ran() {
+        let mut recognized = status(None);
+        recognized.status = Status::Extracted;
+        recognized.output = Some("out/scan.md".into());
+        recognized.ocr = true;
+
+        assert_eq!(
+            serde_json::to_value(&recognized).unwrap(),
+            serde_json::json!({
+                "source": "docs/scan.pdf",
+                "output": "out/scan.md",
+                "status": "extracted",
+                "format": "pdf",
+                "ocr": true,
+            })
+        );
+        assert!(
+            serde_json::to_value(status(None))
+                .unwrap()
+                .get("ocr")
+                .is_none(),
+            "a file that was merely read should not carry an ocr field"
         );
     }
 

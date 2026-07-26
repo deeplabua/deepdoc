@@ -908,6 +908,75 @@ fn manifest_records_inputs_that_could_not_be_read() {
     assert_eq!(entries["notes.txt"]["status"], "extracted");
 }
 
+/// The flag exists in every build; only the ability is optional. A raw
+/// "unexpected argument '--ocr'" would be true and useless — the answer the user
+/// needs is which feature to build, or the two-tool loop that needs no build.
+#[test]
+#[cfg(not(feature = "ocr"))]
+fn ocr_without_the_feature_explains_itself() {
+    let dir = TempDir::new("noocr");
+    let file = dir.write("notes.txt", "hello");
+
+    let output = deepdoc([file.as_os_str(), "--ocr".as_ref()]);
+    assert_eq!(output.status.code(), Some(2));
+
+    let message = String::from_utf8_lossy(&output.stderr);
+    for expected in ["ocr", "feature", "deepocr"] {
+        assert!(
+            message.contains(expected),
+            "the message should mention {expected}:\n{message}"
+        );
+    }
+    assert!(
+        !message.contains("unexpected argument"),
+        "the flag is defined, not unknown:\n{message}"
+    );
+}
+
+/// `--ocr` is an extra attempt at a file that yielded nothing, never a new way
+/// for a run to fail: a walked folder holding one unreadable file must skip it
+/// exactly as it did without the flag.
+#[test]
+#[cfg(feature = "ocr")]
+fn ocr_never_turns_a_skip_into_a_failure() {
+    let Some(models) = test_models() else { return };
+
+    let dir = TempDir::new("ocrskip");
+    dir.write("notes.txt", "hello");
+    dir.write("mystery.bin", "\u{0}\u{1}\u{2}not a document");
+    let out = dir.path().join("out");
+    let manifest = dir.path().join("run.json");
+
+    let output = deepdoc([
+        dir.path().as_os_str(),
+        "--recursive".as_ref(),
+        "-o".as_ref(),
+        out.as_os_str(),
+        "--ocr".as_ref(),
+        "--ocr-model".as_ref(),
+        models.as_os_str(),
+        "--manifest".as_ref(),
+        manifest.as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+
+    // Not "error / io_error", which is what reporting the OCR failure would give.
+    let entries = manifest_by_name(&manifest);
+    assert_eq!(entries["mystery.bin"]["status"], "skipped");
+    assert_eq!(entries["mystery.bin"]["reason"], "unsupported_format");
+    assert!(
+        entries["notes.txt"].get("ocr").is_none(),
+        "a file that was read, not recognized, carries no ocr field"
+    );
+}
+
+/// The models are not in the repository, so this only runs where they are.
+#[cfg(feature = "ocr")]
+fn test_models() -> Option<PathBuf> {
+    let dir = std::env::var_os("DEEPOCR_MODEL_DIR").map(PathBuf::from)?;
+    dir.is_dir().then_some(dir)
+}
+
 #[test]
 fn directory_without_recursive_is_rejected() {
     let dir = TempDir::new("dir");

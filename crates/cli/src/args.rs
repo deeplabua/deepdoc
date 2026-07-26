@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, ValueEnum};
 use deepdoc_core::chunk::DEFAULT_CHUNK_SIZE;
 use deepdoc_core::render::OutputFormat;
 
@@ -34,6 +35,14 @@ pub struct Args {
     /// Write a JSON per-file status report for the whole run to PATH.
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
+
+    /// Recognize scanned pages instead of skipping them (needs the `ocr` build feature).
+    #[arg(long)]
+    pub ocr: bool,
+
+    /// Directory holding the OCR models; also read from DEEPOCR_MODEL_DIR.
+    #[arg(long, value_name = "PATH", requires = "ocr")]
+    pub ocr_model: Option<PathBuf>,
 
     /// Page range for paginated formats: `1-10`, `3`, `2-`.
     #[arg(long, value_name = "RANGE")]
@@ -89,6 +98,29 @@ impl Args {
         self.chunk
             .map(|size| if size == 0 { DEFAULT_CHUNK_SIZE } else { size })
     }
+
+    /// Reject `--ocr` on a build that cannot do it.
+    ///
+    /// The flag is defined in every build on purpose. Leaving it out would make
+    /// clap answer "unexpected argument '--ocr'", which is true and useless:
+    /// the flag exists, this binary just was not built with it, and the two-tool
+    /// loop solves the problem today without any special build.
+    pub fn check_ocr_support(&self) -> Result<(), clap::Error> {
+        if !self.ocr || cfg!(feature = "ocr") {
+            return Ok(());
+        }
+
+        Err(Args::command().error(
+            ErrorKind::InvalidValue,
+            "--ocr needs a build with the `ocr` feature, and this binary does not have it.\n\
+             \n  Build one that does:\n    \
+             cargo install deepdoc --features ocr-fetch-models\n\
+             \n  Or run the two-tool loop, which needs no special build:\n    \
+             deepocr scan.pdf -o scan.ocr.pdf   # invisible text layer over the page image\n    \
+             deepdoc scan.ocr.pdf               # now born-digital — parses normally\n\
+             \n  DeepOCR: https://github.com/deeplabua/deepocr",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +157,26 @@ mod tests {
     #[test]
     fn quiet_and_verbose_conflict() {
         assert!(Args::try_parse_from(["deepdoc", "a.txt", "-q", "-v"]).is_err());
+    }
+
+    /// The flag parses in every build; whether it *works* is the feature's
+    /// business, and `check_ocr_support` is what says so.
+    #[test]
+    fn ocr_parses_everywhere_and_is_checked_separately() {
+        let args = Args::try_parse_from(["deepdoc", "a.pdf", "--ocr"]).unwrap();
+        assert!(args.ocr);
+        assert_eq!(args.check_ocr_support().is_ok(), cfg!(feature = "ocr"));
+
+        let plain = Args::try_parse_from(["deepdoc", "a.pdf"]).unwrap();
+        assert!(!plain.ocr);
+        assert!(plain.check_ocr_support().is_ok());
+    }
+
+    /// A model directory without `--ocr` is a mistake worth catching: it means
+    /// the user thinks OCR is on when it is not.
+    #[test]
+    fn a_model_directory_needs_ocr() {
+        assert!(Args::try_parse_from(["deepdoc", "a.pdf", "--ocr-model", "/m"]).is_err());
+        assert!(Args::try_parse_from(["deepdoc", "a.pdf", "--ocr", "--ocr-model", "/m"]).is_ok());
     }
 }

@@ -35,6 +35,37 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # The `ocr` feature is never in a released binary, so nothing else would
+  # notice it rotting. Building and linting it here is what keeps the optional
+  # path compiling. No models are needed to compile — only to recognize — so
+  # this job stays cheap and the OCR integration tests skip themselves.
+  ocr-feature:
+    name: clippy + test (--features ocr)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features ocr -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --features ocr
+
+      # The whole point of the flag being opt-in: the default build must not
+      # gain a single byte of it.
+      - name: The default build stays model-free
+        run: |
+          if cargo tree -p deepdoc -e normal | grep -q deepocr; then
+            echo "deepocr-core leaked into the default dependency graph"
+            exit 1
+          fi
+          echo "default graph is clean"
+
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

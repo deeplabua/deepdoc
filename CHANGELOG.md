@@ -4,6 +4,63 @@ All notable changes to DeepDoc are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0 — 2026-07-26
+
+### Added
+
+- **`--ocr`, an opt-in build feature** ([#3]). `deepdoc --ocr scan.pdf` recognizes a scan and
+  prints Markdown in one command instead of two — for builds that ask for it. It is off by
+  default and absent from every released binary: the models alone are 12 MB against a 3.8 MB
+  binary, cargo-dist builds one artifact set for all channels (so "brew with models, crates.io
+  without" is not expressible), and recognition is probabilistic, which is not something to put
+  on the default path of a deterministic parser. Two features, so the cost is the one you choose:
+
+  | Feature | What it adds |
+  | --- | --- |
+  | `ocr` | Recognition; models come from `--ocr-model <dir>` or `DEEPOCR_MODEL_DIR`. No weights, no network stack. |
+  | `ocr-fetch-models` | …plus downloading them to the user cache on first run — the only build of DeepDoc that touches the network. |
+
+  There is deliberately no `ocr-embed-models`. `deepocr-core` can compile its weights in, but it
+  reads them with `include_bytes!` from a directory DeepOCR's own CI populates before building;
+  the crate published to crates.io does not carry them, so the feature cannot compile for anyone
+  installing DeepDoc normally. A build flag that only works inside one repository's CI is a trap.
+
+  Recognition runs entirely in memory: the page becomes a searchable PDF that never reaches the
+  filesystem, then goes through DeepDoc's ordinary PDF reader, so an OCR'd scan gets the same
+  reading-order, column and heading handling as any born-digital file. A standalone `.png`,
+  `.jpg` or `.tiff` also becomes readable — not a document to DeepDoc, but a page to DeepOCR.
+
+  `--ocr` is an **extra attempt, never a new failure mode**: when recognition cannot help, the
+  original verdict stands, so a batch skips exactly what it skipped before, for the same reason.
+  It only triggers on a file that yields *no* text at all, so a mostly-text PDF with one scanned
+  page inside still extracts what it has and leaves that page alone.
+- **`"ocr": true` in the manifest** on files whose text was recognized rather than read. Absent on
+  every other row, so a run without `--ocr` emits exactly the 0.2.0 schema. Deterministically
+  parsed text and OCR output are not the same evidence — and a chunk `hash` that changed because
+  a page was recognized differently is a different story from one that changed because the parser
+  improved.
+
+### Changed
+
+- **`--ocr` now explains itself in every build.** It used to fail with clap's
+  `unexpected argument '--ocr'`, which is true and useless. The flag is defined everywhere; a
+  build without the feature rejects it with the feature to install and the two-tool loop that
+  needs no special build. Same exit code (2).
+- The dependency-graph promise is now explicitly about the **default build**. With the `ocr`
+  feature the graph gains `deepocr-core` and its tree, including `dirs-sys` (pure Rust despite the
+  name — `libc` and `option-ext`, nothing compiled) and `hayro`, a page rasterizer. Rendering
+  pages is otherwise deliberately out of scope here; behind an off-by-default flag it is an
+  intentional exception. The default build is unchanged and still contains no C or `-sys` crates.
+
+### Notes
+
+- Determinism is suspended for pages that go through recognition, and a run using `--ocr` says so
+  on stderr. Everything else remains byte-for-byte reproducible.
+- The `ocr` feature needs a newer toolchain than the default build (`deepocr-core` requires Rust
+  1.92; DeepDoc itself still builds on 1.85).
+
+[#3]: https://github.com/deeplabua/deepdoc/issues/3
+
 ## 0.2.0 — 2026-07-26
 
 Auditable ingestion: a parser upgrade now says which chunks it actually changed, and a batch now

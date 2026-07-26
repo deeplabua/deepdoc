@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,11 @@ homepage = "https://github.com/deeplabua/deepdoc"
 authors = ["DeepLab"]
 
 [workspace.dependencies]
-deepdoc-core = { version = "0.2.0", path = "crates/core" }
+deepdoc-core = { version = "0.3.0", path = "crates/core" }
+# Optional, behind the `ocr` feature only — never in the default build.
+# default-features = false keeps both the model weights and the TLS stack out
+# unless the ocr-fetch-models feature asks for them.
+deepocr-core = { version = "0.1.0", default-features = false }  # MIT OR Apache-2.0
 
 # All dependencies must be permissive (MIT / Apache-2.0 / BSD / MPL / Zlib).
 # No GPL/AGPL/commercial-only crates — check the licence before adding one.

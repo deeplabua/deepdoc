@@ -16,10 +16,29 @@ categories = ["command-line-utilities", "text-processing"]
 name = "deepdoc"
 path = "src/main.rs"
 
+# OCR is opt-in at build time, never in the released binaries. The models alone
+# are 12 MB against a 3.8 MB binary, cargo-dist builds one artifact set for every
+# channel, and recognition is probabilistic — none of that belongs on the default
+# path of a deterministic parser. See `crates/cli/src/ocr.rs`.
+[features]
+default = []
+# Recognize scans. Models come from --ocr-model / DEEPOCR_MODEL_DIR: no weights in
+# the binary, no network stack in the graph.
+ocr = ["dep:deepocr-core"]
+# …or download them into the user cache on first run. This adds a TLS stack, and
+# it is the only build of DeepDoc that ever touches the network.
+ocr-fetch-models = ["ocr", "deepocr-core/fetch-models"]
+# There is deliberately no `ocr-embed-models`. `deepocr-core/embed-models` reads
+# the weights with include_bytes! from a `models/` directory that DeepOCR's own
+# CI drops in before building — the crate published to crates.io does not carry
+# them, so the feature cannot compile for anyone installing DeepDoc normally. A
+# build flag that only works in one repository's CI is a trap, not an option.
+
 [dependencies]
 deepdoc-core = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+deepocr-core = { workspace = true, optional = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

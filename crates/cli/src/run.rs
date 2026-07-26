@@ -52,6 +52,15 @@ struct Report {
     /// The detected format. Worth reporting even when extraction failed:
     /// "this *pdf* is a scan" is the routing signal a manifest exists for.
     format: Option<deepdoc_core::Format>,
+    /// True when the text was recognized rather than read.
+    ocr: bool,
+}
+
+/// What extracting one file produced, beyond the rendered text.
+struct Extracted {
+    rendered: String,
+    format: Option<deepdoc_core::Format>,
+    ocr: bool,
 }
 
 /// Everything the per-file work needs; shared across the worker threads.
@@ -61,6 +70,9 @@ struct Run<'a> {
     render_opts: RenderOpts,
     format: OutputFormat,
     output_is_dir: bool,
+    /// The recognizer, loaded once for the whole run. `None` unless `--ocr`.
+    #[cfg(feature = "ocr")]
+    ocr: Option<crate::ocr::Engine>,
 }
 
 /// Run the whole invocation and return the process exit code.
@@ -95,6 +107,8 @@ pub fn run(args: &Args) -> Result<i32> {
         },
         format: args.format.into(),
         output_is_dir,
+        #[cfg(feature = "ocr")]
+        ocr: load_ocr(args, &logger)?,
     };
 
     // Files are extracted in parallel but reported in input order: a batch that
@@ -121,6 +135,7 @@ pub fn run(args: &Args) -> Result<i32> {
             status: Status::Error,
             reason: Some(Reason::of(&problem.error)),
             format: None,
+            ocr: false,
         });
 
         if problem.skip {
@@ -137,6 +152,7 @@ pub fn run(args: &Args) -> Result<i32> {
     for (job, report) in jobs.iter().zip(reports) {
         let source = job.path.display().to_string();
         let format = report.format;
+        let ocr = report.ocr;
 
         let status = match report.outcome {
             Outcome::Written(target) => {
@@ -148,6 +164,7 @@ pub fn run(args: &Args) -> Result<i32> {
                     status: Status::Extracted,
                     reason: None,
                     format,
+                    ocr,
                 }
             }
             Outcome::Printed(text) => {
@@ -163,6 +180,7 @@ pub fn run(args: &Args) -> Result<i32> {
                     status: Status::Extracted,
                     reason: None,
                     format,
+                    ocr,
                 }
             }
             Outcome::Skipped(error) => {
@@ -175,6 +193,7 @@ pub fn run(args: &Args) -> Result<i32> {
                     status: Status::Skipped,
                     reason: Some(Reason::of(&error)),
                     format,
+                    ocr,
                 }
             }
             Outcome::Failed(error) => {
@@ -187,6 +206,7 @@ pub fn run(args: &Args) -> Result<i32> {
                     status: Status::Error,
                     reason: Some(Reason::of(&error)),
                     format,
+                    ocr,
                 }
             }
         };
@@ -210,12 +230,16 @@ pub fn run(args: &Args) -> Result<i32> {
 
 /// Extract, render and deliver one file.
 fn process(job: &Job, context: &Run) -> Report {
-    let (result, format) = match extract_one(job, context) {
-        Ok((rendered, format)) => (write_output(job, &rendered, context), format),
+    let (result, format, ocr) = match extract_one(job, context) {
+        Ok(extracted) => (
+            write_output(job, &extracted.rendered, context),
+            extracted.format,
+            extracted.ocr,
+        ),
         // Extraction never got as far as a `Document`, so ask the detector
         // directly rather than leave the manifest saying "format unknown" about
         // a file whose type is exactly what makes the failure actionable.
-        Err(error) => (Err(error), detected_format(job, context)),
+        Err(error) => (Err(error), detected_format(job, context), false),
     };
 
     let outcome = match result {
@@ -223,7 +247,11 @@ fn process(job: &Job, context: &Run) -> Report {
         Err(error) if job.discovered && is_skip(&error) => Outcome::Skipped(error),
         Err(error) => Outcome::Failed(error),
     };
-    Report { outcome, format }
+    Report {
+        outcome,
+        format,
+        ocr,
+    }
 }
 
 /// Sniff a file's type, for the manifest only — nothing else needs it, and it
@@ -234,25 +262,142 @@ fn detected_format(job: &Job, context: &Run) -> Option<deepdoc_core::Format> {
 }
 
 /// Extract a single file and render it, reporting the format it turned out to be.
-fn extract_one(job: &Job, context: &Run) -> Result<(String, Option<deepdoc_core::Format>)> {
+fn extract_one(job: &Job, context: &Run) -> Result<Extracted> {
     let args = context.args;
-    let doc: Document = extract_path(&job.path, &context.extract_opts)?;
+    let (doc, ocr) = extract_document(job, context)?;
     let format = doc.meta.source_format;
 
-    if let Some(size) = args.chunk_size() {
+    let rendered = if let Some(size) = args.chunk_size() {
         let opts = ChunkOpts {
             size,
             overlap: args.chunk_overlap,
         };
-        let rendered = render_chunks(&chunk(&doc, &opts), &doc, &job.path, args.format);
-        return Ok((rendered, format));
+        render_chunks(&chunk(&doc, &opts), &doc, &job.path, args.format)
+    } else {
+        let mut rendered = render(&doc, context.format, &context.render_opts);
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        rendered
+    };
+
+    Ok(Extracted {
+        rendered,
+        format,
+        ocr,
+    })
+}
+
+/// Read one file into a `Document`, recognizing it first if that is the only
+/// way it will yield text and `--ocr` allowed it.
+fn extract_document(job: &Job, context: &Run) -> Result<(Document, bool)> {
+    match extract_path(&job.path, &context.extract_opts) {
+        Ok(doc) => Ok((doc, false)),
+        Err(error) if wants_ocr(context, &error) => match recognize(job, context) {
+            Ok(doc) => Ok((doc, true)),
+            // Recognition is an extra attempt, never a new failure mode: when it
+            // cannot help, the original verdict stands. Otherwise `--ocr` would
+            // turn a batch's skip into an error — a walked folder holding one
+            // `.bin` would start failing runs that used to pass, and the
+            // manifest would report `io_error` for a file whose real answer is
+            // `unsupported_format`.
+            Err(ocr_error) => Err(match error {
+                // DeepDoc did not know this file and neither does DeepOCR.
+                // Saying so twice adds nothing.
+                deepdoc_core::Error::Unsupported { .. } => error.into(),
+                // A document DeepDoc *did* recognise, that OCR still could not
+                // read, is worth explaining — the file is not the problem.
+                _ => anyhow::Error::new(error).context(format!("{ocr_error:#}")),
+            }),
+        },
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether this failure is one recognition could fix, on a run that asked for it.
+///
+/// `NoText` is the obvious case — a recognised document that turned out to be a
+/// scan. `Unsupported` is here because a bare `.png` is not a document to
+/// DeepDoc at all, and to DeepOCR it is a page; letting it through is what makes
+/// `--ocr` work on a folder of scans rather than only on scanned PDFs.
+#[cfg(feature = "ocr")]
+fn wants_ocr(context: &Run, error: &deepdoc_core::Error) -> bool {
+    context.ocr.is_some()
+        && matches!(
+            error,
+            deepdoc_core::Error::NoText { .. } | deepdoc_core::Error::Unsupported { .. }
+        )
+}
+
+#[cfg(not(feature = "ocr"))]
+fn wants_ocr(_context: &Run, _error: &deepdoc_core::Error) -> bool {
+    false
+}
+
+/// Recognize a file and parse the result as the born-digital PDF it now is.
+#[cfg(feature = "ocr")]
+fn recognize(job: &Job, context: &Run) -> Result<Document> {
+    use deepdoc_core::Metadata;
+
+    let engine = context
+        .ocr
+        .as_ref()
+        .expect("wants_ocr only says yes with an engine loaded");
+    let recognized = engine.to_searchable_pdf(&job.path)?;
+
+    // The searchable PDF never reaches the filesystem: it is parsed straight
+    // from memory by the same reader every other PDF goes through.
+    let parsed = deepdoc_core::extract::pdf::parse(&recognized.bytes, context.extract_opts.pages)
+        .map_err(|message| {
+        anyhow!(
+            "cannot parse the recognized {}: {message}",
+            job.path.display()
+        )
+    })?;
+
+    if recognized.pages == 0 {
+        return Err(anyhow!(
+            "{} has no page to recognize — OCR found nothing to work on",
+            job.path.display()
+        ));
     }
 
-    let mut rendered = render(&doc, context.format, &context.render_opts);
-    if !rendered.ends_with('\n') {
-        rendered.push('\n');
+    Ok(Document {
+        meta: Metadata {
+            // What the *input* was, not the PDF we assembled on the way: an
+            // image stays unrecognised by DeepDoc's own detector, and claiming
+            // "pdf" there would describe our scratch buffer, not the file.
+            source_format: deepdoc_core::detect_path(&job.path).ok(),
+            source_path: Some(job.path.display().to_string()),
+            ..parsed.meta
+        },
+        blocks: parsed.blocks,
+    })
+}
+
+#[cfg(not(feature = "ocr"))]
+fn recognize(_job: &Job, _context: &Run) -> Result<Document> {
+    unreachable!("wants_ocr is always false without the ocr feature")
+}
+
+/// Load the recognizer once for the whole run.
+#[cfg(feature = "ocr")]
+fn load_ocr(args: &Args, logger: &Logger) -> Result<Option<crate::ocr::Engine>> {
+    if !args.ocr {
+        return Ok(None);
     }
-    Ok((rendered, format))
+
+    // Said once, up front, because it is the one promise this flag suspends.
+    logger.warn(
+        "--ocr recognizes text; recognition is probabilistic, so output for scanned pages is \
+         not guaranteed to be identical between runs",
+    );
+    logger.verbose(format!(
+        "loading OCR models from {}",
+        crate::ocr::model_source(args.ocr_model.as_ref())
+    ));
+
+    crate::ocr::Engine::load(args.ocr_model.as_deref()).map(Some)
 }
 
 /// Serialize chunks in the requested output format.
