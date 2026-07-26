@@ -242,7 +242,7 @@ fn a_page_without_text_asks_for_ocr() {
     let error = extract_path(&path, &ExtractOpts::default()).expect_err("should fail");
     assert_eq!(error.exit_code(), 4, "no text means the scan exit code");
     assert!(
-        error.to_string().contains("--ocr"),
+        error.to_string().contains("deepocr"),
         "the message should point at OCR: {error}"
     );
 }

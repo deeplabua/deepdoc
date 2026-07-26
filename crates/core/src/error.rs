@@ -14,7 +14,7 @@ pub mod exit_code {
     pub const FAILURE: i32 = 1;
     /// Invalid arguments (also what clap returns on its own).
     pub const USAGE: i32 = 2;
-    /// Recognised document, but no extractable text — looks like a scan, needs `--ocr`.
+    /// Recognised document, but no extractable text — looks like a scan, needs OCR first.
     pub const NO_TEXT: i32 = 4;
     /// Unsupported file type.
     pub const UNSUPPORTED: i32 = 5;
@@ -36,7 +36,13 @@ pub enum Error {
     #[error("{format} is not supported yet")]
     NotImplemented { format: Format },
 
-    #[error("{path} has no extractable text — it looks like a scan (needs --ocr)")]
+    /// The message names the tool that fixes it: OCR deliberately lives outside
+    /// this deterministic path (see `deepocr`), so pointing at a sibling binary
+    /// is more honest than pointing at a flag DeepDoc does not have.
+    #[error(
+        "{path} has no extractable text — it looks like a scan. Make it searchable with \
+         deepocr first, then extract the result (https://github.com/deeplabua/deepocr)"
+    )]
     NoText { path: PathBuf },
 
     #[error("cannot parse {path}: {message}")]

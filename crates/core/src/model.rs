@@ -27,7 +27,7 @@ impl Document {
 
     /// True when the document carries no extractable text at all.
     ///
-    /// Used by the "looks like a scan, needs `--ocr`" heuristic (exit code 4).
+    /// Used by the "looks like a scan, run it through `deepocr`" heuristic (exit code 4).
     pub fn is_empty(&self) -> bool {
         self.blocks.iter().all(|b| b.plain_text().trim().is_empty())
     }

@@ -15,7 +15,7 @@
 //! Tables are deliberately not reconstructed: a wrong table is worse to read
 //! than the paragraphs it was made from, and the PRD puts complex tabular PDF
 //! outside v0.1's lane. Scanned pages yield no characters at all, which the
-//! caller turns into the "needs --ocr" exit code.
+//! caller turns into the "looks like a scan" exit code.
 
 use std::path::Path;
 

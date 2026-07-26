@@ -108,6 +108,21 @@ deepdoc big.pdf --pages 1-10
 
 The original file is never modified — DeepDoc only reads.
 
+### Scanned documents
+
+A scan has no text to extract, so DeepDoc says so instead of inventing something: it exits
+with code **4** and names the file. That is a clean routing signal for an ingestion pipeline —
+make the scan searchable with [DeepOCR](https://github.com/deeplabua/deepocr) (a sibling tool,
+same idea: pure Rust, local, models embedded), then extract the result:
+
+```sh
+deepocr scan.pdf -o scan.ocr.pdf   # invisible text layer over the page image
+deepdoc scan.ocr.pdf               # now it is born-digital — parse as usual
+```
+
+OCR stays deliberately **outside** DeepDoc: recognition is a probabilistic step, and mixing it
+into a deterministic parser would cost the property this tool is built on.
+
 ### Supported inputs (v0.1)
 
 | Family | Formats |
@@ -117,7 +132,7 @@ The original file is never modified — DeepDoc only reads.
 | Spreadsheets | `.xlsx`, `.ods`, `.csv` |
 | Books | `.epub` |
 | Web / text | `.html`, `.md`, `.txt` |
-| PDF | `.pdf` (born-digital text; scanned PDFs need the planned `--ocr`) |
+| PDF | `.pdf` (born-digital text; for scans see [Scanned documents](#scanned-documents)) |
 
 ## How it works
 
@@ -129,9 +144,11 @@ detection. Everything runs in-process — nothing is uploaded and nothing is she
 
 ## Scope
 
-DeepDoc extracts **born-digital** documents (real embedded text). Scanned pages and images
-need OCR, which is a planned **feature-gated** path (pure-Rust `ocrs`, or `tesseract`), off
-by default to keep the binary small. High-fidelity table recovery from complex/scanned PDFs
+DeepDoc extracts **born-digital** documents (real embedded text). Scanned pages and images go
+through [DeepOCR](https://github.com/deeplabua/deepocr) first (see
+[Scanned documents](#scanned-documents)); a `--ocr` feature that links its engine straight in
+is planned, off by default so the default binary stays small and model-free.
+High-fidelity table recovery from complex/scanned PDFs
 is where ML parsers (Docling, Marker) win — DeepDoc's lane is speed, determinism, and zero
 dependencies on the clean majority.
 

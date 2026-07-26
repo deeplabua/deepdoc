@@ -271,7 +271,7 @@ fn a_pdf_without_text_exits_with_four() {
     let output = deepdoc([path.as_os_str()]);
     assert_eq!(output.status.code(), Some(4));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--ocr"),
+        String::from_utf8_lossy(&output.stderr).contains("deepocr"),
         "the message should point at OCR"
     );
 }
