@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/DeepDoc-256.png" width="128" height="128" alt="DeepDoc icon"></p>
+
 # DeepDoc
 
 > Any document → clean Markdown. One command, local, no cloud.
